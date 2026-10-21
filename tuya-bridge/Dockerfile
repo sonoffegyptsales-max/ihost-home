@@ -1,4 +1,14 @@
 # Tuya Bridge for SONOFF iHost - runs as an iHost Docker add-on (linux/arm/v7) or anywhere else.
+
+# ---- stage 1: build wheels (cffi has no prebuilt armv7 wheel, so it needs a compiler here)
+FROM python:3.12-slim AS wheels
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential libffi-dev \
+ && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt /tmp/
+RUN pip wheel --no-cache-dir --wheel-dir /wheels -r /tmp/requirements.txt
+
+# ---- stage 2: small runtime image (no compiler)
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -10,9 +20,9 @@ ENV PYTHONUNBUFFERED=1 \
     IHOST_HOST=http://127.0.0.1
 
 WORKDIR /app
+COPY --from=wheels /wheels /wheels
 COPY requirements.txt .
-# cryptography ships prebuilt wheels for armv7l / aarch64 / x86_64 (no compiler needed)
-RUN pip install --only-binary=cryptography -r requirements.txt
+RUN pip install --no-index --find-links=/wheels -r requirements.txt && rm -rf /wheels
 COPY bridge.py .
 COPY web ./web
 
