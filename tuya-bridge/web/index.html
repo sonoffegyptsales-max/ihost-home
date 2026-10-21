@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tuya Bridge for iHost</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Tuya Bridge <small id="ver"></small></h1>
+  <p class="sub">Tuya Wi-Fi devices inside your SONOFF iHost — controlled locally, no cloud.</p>
+</header>
+<main>
+  <section class="card" id="stepIhost">
+    <h2><span class="num">1</span> Connect the iHost <span id="ihostBadge" class="badge"></span></h2>
+    <p id="ihostInfo" class="muted"></p>
+    <form id="ihostForm" class="row">
+      <input id="ihostHost" placeholder="http://127.0.0.1 (when running on the iHost)" autocomplete="off">
+      <button type="submit" id="pairBtn">Connect</button>
+    </form>
+    <p id="pairMsg" class="hint"></p>
+  </section>
+
+  <section class="card">
+    <h2><span class="num">2</span> Import your Tuya devices</h2>
+    <p class="muted">Each device needs its <b>local key</b>. Get them once from your free Tuya IoT cloud project
+      (after that, the cloud is never used for control).</p>
+    <details open>
+      <summary>From the Tuya cloud project</summary>
+      <form id="cloudForm" class="grid">
+        <label>Data center
+          <select id="region">
+            <option value="eu">Central Europe (eu)</option>
+            <option value="weu">Western Europe (weu)</option>
+            <option value="us">Western America (us)</option>
+            <option value="ueaz">Eastern America (ueaz)</option>
+            <option value="cn">China (cn)</option>
+            <option value="in">India (in)</option>
+            <option value="sg">Singapore (sg)</option>
+          </select></label>
+        <label>Access ID / Client ID <input id="apiKey" autocomplete="off"></label>
+        <label>Access Secret / Client Secret <input id="apiSecret" type="password" autocomplete="new-password"></label>
+        <label>Any one device ID <input id="anyDev" autocomplete="off" placeholder="optional"></label>
+        <button type="submit">Import from cloud</button>
+      </form>
+    </details>
+    <details>
+      <summary>Or paste devices.json (from <code>python -m tinytuya wizard</code>)</summary>
+      <form id="jsonForm">
+        <textarea id="jsonText" rows="6" placeholder='[{"name": "Kitchen plug", "id": "...", "key": "..."}]'></textarea>
+        <button type="submit">Import devices.json</button>
+      </form>
+    </details>
+    <p id="importMsg" class="hint"></p>
+  </section>
+
+  <section class="card">
+    <h2><span class="num">3</span> Find them on the network and add to the iHost</h2>
+    <div class="row">
+      <button id="scanBtn">Scan network</button>
+      <span id="scanMsg" class="hint"></span>
+    </div>
+    <div id="devices"></div>
+  </section>
+
+  <p class="foot muted">Control runs from this bridge straight to each device (TCP 6668). Status is refreshed every few seconds.
+    Service address: <code id="svc"></code></p>
+</main>
+<dialog id="editDlg">
+  <form method="dialog" id="editForm">
+    <h3>Device settings</h3>
+    <label>Name <input id="eName"></label>
+    <label>IP address <input id="eIp" placeholder="192.168.1.50"></label>
+    <label>Protocol version
+      <select id="eVer"><option>3.1</option><option>3.2</option><option>3.3</option><option>3.4</option><option>3.5</option></select></label>
+    <label>Switch DPS numbers (multi-gang, optional) <input id="eDps" placeholder="1,2,3"></label>
+    <menu><button value="cancel" formnovalidate>Cancel</button><button id="eSave" value="save">Save</button></menu>
+  </form>
+</dialog>
+<script src="app.js"></script>
+</body>
+</html>

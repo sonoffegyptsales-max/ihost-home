@@ -6,3 +6,5 @@ config.json
 prefs.json
 bin/
 *.bak
+tuya-bridge
+.github
