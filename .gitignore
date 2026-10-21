@@ -1,0 +1,8 @@
+config.json
+prefs.json
+cli/config.json
+cli/scenes.json
+*.tmp
+__pycache__/
+*.pyc
+.venv*/

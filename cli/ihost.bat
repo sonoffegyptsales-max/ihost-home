@@ -1,0 +1,3 @@
+@echo off
+rem Usage: ihost list | ihost off all | ihost scene goodnight ...
+python "%~dp0ihost.py" %*

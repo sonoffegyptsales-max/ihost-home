@@ -1,0 +1,19 @@
+{
+  "goodnight": [
+    { "target": "all", "action": "off" },
+    { "target": "tag:room=bedroom", "set": { "percentage": 0 } }
+  ],
+  "movie": [
+    { "target": "tag:room=living,cat:light", "set": { "brightness": 20, "colortemp": 0 } },
+    { "target": "Kitchen", "action": "off" }
+  ],
+  "morning": [
+    { "target": "tag:room=bedroom", "set": { "percentage": 100 } },
+    { "target": "cat:light", "action": "on", "delay": 1 },
+    { "target": "cat:light", "set": { "brightness": 100, "colortemp": 80 } }
+  ],
+  "living-ch1-only": [
+    { "target": "Living Wall Switch", "action": "on", "channel": "1" },
+    { "target": "Living Wall Switch", "action": "off", "channel": "2" }
+  ]
+}
