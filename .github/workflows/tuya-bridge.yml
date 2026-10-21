@@ -19,29 +19,32 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
-      - name: Work out image names
-        id: names
-        run: |
-          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          tags="ghcr.io/${owner}/ihost-tuya-bridge:latest"
-          tags="${tags},ghcr.io/${owner}/ihost-tuya-bridge:${GITHUB_SHA::7}"
-          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
-            tags="${tags},${{ secrets.DOCKERHUB_USERNAME }}/ihost-tuya-bridge:latest"
-            echo "dockerhub=true" >> "$GITHUB_OUTPUT"
-          fi
-          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
-
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - if: steps.names.outputs.dockerhub == 'true'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Docker Hub (the iHost's "Add add-on" search only looks there). Secrets are trimmed because a
+      # pasted space/newline makes Docker Hub answer "malformed HTTP Authorization header".
+      - name: Log in to Docker Hub and work out image names
+        id: names
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          tags="ghcr.io/${owner}/ihost-tuya-bridge:latest,ghcr.io/${owner}/ihost-tuya-bridge:${GITHUB_SHA::7}"
+          user=$(printf '%s' "$DH_USER" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+          token=$(printf '%s' "$DH_TOKEN" | tr -d '[:space:]')
+          if [ -n "$user" ]; then
+            echo "Docker Hub user length ${#user} | token length ${#token} | token starts with dckr_pat_: $([ "${token#dckr_pat_}" != "$token" ] && echo yes || echo no)"
+            case "$user" in *@*) echo "::error::DOCKERHUB_USERNAME must be the Docker Hub username, not the e-mail address"; exit 1;; esac
+            printf '%s' "$token" | docker login -u "$user" --password-stdin
+            tags="${tags},${user}/ihost-tuya-bridge:latest"
+            echo "dockerhub_image=${user}/ihost-tuya-bridge" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v6
         with:
@@ -62,3 +65,4 @@ jobs:
           curl -sf http://127.0.0.1:8321/healthz
           curl -sf http://127.0.0.1:8321/api/status | head -c 300; echo
           docker logs tb
+          echo "Docker Hub image: ${{ steps.names.outputs.dockerhub_image }}"
