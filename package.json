@@ -1,0 +1,7 @@
+{
+  "name": "ihost-home",
+  "private": true,
+  "type": "module",
+  "description": "HomeKit-style app for SONOFF iHost. Cloud API for Vercel in api/; home server in server.py.",
+  "engines": { "node": ">=20" }
+}

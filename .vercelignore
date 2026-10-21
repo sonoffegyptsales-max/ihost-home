@@ -1,0 +1,8 @@
+tests/
+cli/
+server.py
+start.bat
+config.json
+prefs.json
+bin/
+*.bak

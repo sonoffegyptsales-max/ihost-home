@@ -580,6 +580,14 @@
       <button class="row tap" style="color:var(--red)" data-act="remove-hub"><span class="lbl">Remove This iHost…</span></button>`}
     </div>`;
 
+    if (sec.cloud) {
+      h += `<div class="group-label">Access</div><div class="group">
+        <div class="row"><span class="lbl">Connection</span><span class="val">eWeLink remote</span></div>
+        <div class="row"><span class="lbl">Address</span><span class="val">${esc(location.host)}</span></div>
+        <button class="row tap" style="color:var(--red)" data-act="signout"><span class="lbl">Sign Out</span></button>
+      </div><div class="group-foot">Cloud version on Vercel. The password is the APP_PASSWORD setting in the Vercel project. Change it there (and redeploy) to sign every device out.</div>`;
+      return h;
+    }
     const rem = sec.remote || {};
     const remState = rem.enabled ? (rem.state === "running" ? "On" : rem.state === "error" ? "Problem" : "Starting…") : "Off";
     h += `<div class="group-label">Access</div><div class="group">
@@ -742,6 +750,13 @@
 
   function showLogin(msg) {
     pageMode();
+    if (S.session.setup) {
+      $("#homeTitle").textContent = "Home";
+      $("#content").innerHTML = `<div class="center-card"><div class="big-ico"><img src="/icon.svg" width="64" height="64" alt=""></div>
+        <h2>Almost ready</h2><p>${esc(S.session.setup)}</p><button class="btn secondary" id="retrySetup">Check Again</button></div>`;
+      $("#retrySetup").onclick = boot;
+      return;
+    }
     $("#homeTitle").textContent = "Home";
     $("#content").innerHTML = `<div class="center-card">
       <div class="big-ico"><img src="/icon.svg" width="64" height="64" alt=""></div>

@@ -84,6 +84,32 @@ Two kinds of address:
 The computer running the app must stay on for internet access. While Internet Access is off, every request
 from outside is refused, even with a valid password.
 
+## Cloud version (Vercel), no computer at home
+
+Every iHost also has a remote address from eWeLink, `https://<deviceid>.cube.ewelink.cc`. It passes the
+iHost Open API through, including live events, so the app can run on **Vercel** and reach the iHost from
+anywhere without a computer at home. `api/index.mjs` is the cloud API; the same web app is served from `static/`.
+
+Set these in Vercel → Project → Settings → Environment Variables (Production), then redeploy:
+
+| Variable | Value |
+|---|---|
+| `APP_PASSWORD` | sign-in password, **10+ characters** (changing it signs everyone out) |
+| `IHOST_URL` | `https://<deviceid>.cube.ewelink.cc`, where the device ID is shown in the iHost console (e.g. `1001ec4e2e`) |
+| `IHOST_TOKEN` | the iHost Open API token (get one with the home version or `cli/ihost.py token`) |
+| `IHOST_NAME` | optional home name |
+| `IHOSTS` | optional, several homes: `[{"name":"Villa","url":"https://….cube.ewelink.cc","token":"…"}]` |
+| `SESSION_SECRET` | optional random string. Change it to sign every device out |
+
+Open the **production** address (e.g. `https://ihost-home.vercel.app`). Per-deployment preview links are behind
+Vercel's own login (Deployment Protection).
+
+**Cloud version notes:**
+- Favorites and icons are stored on the iHost (tag `ihh_ui`), so every phone sees the same.
+- Live updates stream for about 55 seconds per request and reconnect automatically.
+- Adding iHosts, scanning, the free tunnel and the home PIN are home-version features.
+- **Security:** the token sits in Vercel's encrypted settings, and anyone who can open the Vercel project can read it. Keep the team small, use a long password, and never share the iHost's `?auth=` console link.
+
 ## Using it
 
 | Action | How |

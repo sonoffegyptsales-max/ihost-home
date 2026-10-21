@@ -10,3 +10,8 @@ __pycache__/
 .venv*/
 shots/
 testdata/
+.vercel/
+vercel-password.txt
+
+.vercel
+.env*
