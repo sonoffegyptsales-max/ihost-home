@@ -390,8 +390,15 @@
     const act = document.activeElement;
     // never re-render under the user's cursor while they type
     if (!force && act && inner.contains(act) && act.tagName === "INPUT" && act.type !== "checkbox") return;
-    const scroll = inner.scrollTop;
     const sp = S.sheet;
+    if (!force && sp.type === "settings" && sp.sub === "password") return; // a form: nothing live to refresh
+    const scroll = inner.scrollTop;
+    // remember anything the user typed but hasn't saved yet, so a redraw can't wipe it
+    const typed = {};
+    inner.querySelectorAll("input:not([type=checkbox])").forEach((i) => {
+      const k = i.id || i.dataset.rename || i.dataset.renameCh;
+      if (k && i.value !== i.defaultValue) typed[k] = i.value;
+    });
     let html = "";
     if (sp.type === "acc") html = accSheet(sp);
     else if (sp.type === "settings") html = settingsSheet(sp);
@@ -399,6 +406,10 @@
     else if (sp.type === "homes") html = homesSheet();
     if (html == null) { closeSheet(); return; }
     inner.innerHTML = html;
+    inner.querySelectorAll("input:not([type=checkbox])").forEach((i) => {
+      const k = i.id || i.dataset.rename || i.dataset.renameCh;
+      if (k && k in typed && !k.startsWith("pw")) i.value = typed[k];
+    });
     inner.scrollTop = scroll;
   }
 
@@ -528,14 +539,16 @@
       return h;
     }
     if (sp.sub === "password") {
-      let h = head(null, false, sec.has_password ? "Change Password" : "Set Password", "For signing in from outside your home", null, "back");
+      let h = head(null, false, sec.has_password ? "Change Password or PIN" : "Set Password or PIN", "Protects this home", null, "back");
       h += `<form data-form="password" style="margin-top:6px" autocomplete="on">
         <input type="text" name="username" value="ihost-home" autocomplete="username" hidden>
         ${sec.has_password ? `<input class="field" id="pwCurrent" type="password" placeholder="${sec.weak_password ? "Current PIN" : "Current password"}" autocomplete="current-password" aria-label="Current password">` : ""}
-        <input class="field" id="pwNew" type="password" placeholder="New password (at least 8 characters)" autocomplete="new-password" aria-label="New password">
-        <input class="field" id="pwNew2" type="password" placeholder="Repeat new password" autocomplete="new-password" aria-label="Repeat new password">
-        <button class="btn" type="submit">Save Password</button></form>
-        <div class="group-foot" style="margin-top:10px">Saving signs out every other phone and browser.</div>`;
+        <input class="field" id="pwNew" type="password" placeholder="New password or PIN" autocomplete="new-password" aria-label="New password or PIN">
+        <input class="field" id="pwNew2" type="password" placeholder="Repeat it" autocomplete="new-password" aria-label="Repeat new password">
+        <div id="pwErr" role="alert" style="color:var(--red);font-size:14px;margin:0 4px 10px;min-height:0"></div>
+        <button class="btn" type="submit">Save</button></form>
+        <div class="group-foot" style="margin-top:10px">A PIN of 4+ digits is fine at home. <b>Internet Access needs at least 8 characters</b> (letters and numbers).
+        Saving signs out every other phone and browser.</div>`;
       return h;
     }
     if (sp.sub === "remote") return remoteSheet(sec);
@@ -571,7 +584,7 @@
     const remState = rem.enabled ? (rem.state === "running" ? "On" : rem.state === "error" ? "Problem" : "Starting…") : "Off";
     h += `<div class="group-label">Access</div><div class="group">
       <button class="row tap" data-act="remote"><span class="lbl">Internet Access</span><span class="val" style="${rem.enabled && rem.state === "running" ? "color:var(--green)" : ""}">${remState}</span>${chev}</button>
-      <button class="row tap" data-act="password"><span class="lbl">Password</span><span class="val">${sec.weak_password ? "PIN (upgrade)" : sec.has_password ? "Change" : "Not Set"}</span>${chev}</button>
+      <button class="row tap" data-act="password"><span class="lbl">Password</span><span class="val">${sec.weak_password ? "PIN" : sec.has_password ? "Password" : "Not Set"}</span>${chev}</button>
       <div class="row"><span class="lbl">Ask for Password at Home</span>${iosSwitch('data-act="lan-login"', sec.lan_login, !sec.has_password, "Ask for password at home")}</div>
       <button class="row tap action" data-act="signout-all"><span class="lbl">Sign Out All Other Devices</span></button>
       ${S.session.login_required ? `<button class="row tap" style="color:var(--red)" data-act="signout"><span class="lbl">Sign Out</span></button>` : ""}
@@ -582,14 +595,14 @@
   function remoteSheet(sec) {
     const rem = sec.remote || {};
     const remoteSession = !!S.session.remote;
-    const stateText = { off: "Off", downloading: "Downloading connector…", starting: "Connecting…", running: "Connected", error: "Problem" }[rem.state] || rem.state;
+    const stateText = { off: "Off", downloading: "Downloading connector…", starting: "Connecting…", verifying: "Getting your link ready…", running: "Connected", error: "Problem" }[rem.state] || rem.state;
     let h = head(null, false, "Internet Access", "Control this home from anywhere", null, "back");
     h += `<div class="group" style="margin-top:6px">
-      <div class="row"><span class="lbl">Internet Access</span>${iosSwitch('data-act="remote-toggle"', rem.enabled, !sec.has_password || sec.weak_password || remoteSession, "Internet access")}</div>
+      <div class="row"><span class="lbl">Internet Access</span>${iosSwitch('data-act="remote-toggle"', rem.enabled, remoteSession, "Internet access")}</div>
       ${rem.enabled ? `<div class="row"><span class="lbl">Status</span><span class="val" style="color:${rem.state === "running" ? "var(--green)" : rem.state === "error" ? "var(--red)" : "var(--ink-2)"}">${esc(stateText)}</span></div>` : ""}
     </div>`;
     if (!sec.has_password) h += `<div class="group-foot">Set a password first. Anyone opening the link must enter it.</div><div style="margin-top:12px"><button class="btn" data-act="password">Set Password</button></div>`;
-    else if (sec.weak_password) h += `<div class="group-foot">Your current PIN is too short to protect the home on the internet. Set a password with at least 8 characters first.</div><div style="margin-top:12px"><button class="btn" data-act="password">Set New Password</button></div>`;
+    else if (sec.weak_password) h += `<div class="group-foot">Your PIN is too short to protect the home on the internet. Change it to a password with at least 8 characters, then turn this on.</div><div style="margin-top:12px"><button class="btn" data-act="password">Change PIN to a Password</button></div>`;
     else if (remoteSession) h += `<div class="group-foot">You're connected over the internet. Turn this on or off from home.</div>`;
     else h += `<div class="group-foot">Uses a secure Cloudflare tunnel. No router or port-forwarding changes needed. This computer must stay on.</div>`;
     if (rem.error && rem.enabled) h += `<div class="group-foot" style="color:var(--red)">${esc(rem.error)}</div>`;
@@ -1018,7 +1031,7 @@
       case "homes": return openSheet({ type: "homes" });
       case "add-hub": return showAddHub();
       case "remote": await reloadSecurity(); return openSheet({ type: "settings", sub: "remote" });
-      case "password": return openSheet({ type: "settings", sub: "password" });
+      case "password": if (sp.sub === "remote") S.afterPassword = "remote"; return openSheet({ type: "settings", sub: "password" });
       case "copy-url": return copyText(S.security.remote.url, "Link copied");
       case "copy-link": return copyText(`${S.security.remote.url || location.origin}/login?key=${S.newLink}`, "Sign-in link copied");
       case "make-link":
@@ -1090,14 +1103,22 @@
     if (e.target.dataset.form !== "password") return;
     e.preventDefault();
     const cur = $("#pwCurrent"), n1 = $("#pwNew").value, n2 = $("#pwNew2").value;
-    if (n1.length < 8) return toast("Use at least 8 characters", true);
-    if (n1 !== n2) return toast("The new passwords don't match", true);
+    const err = (m) => { $("#pwErr").textContent = m; toast(m, true); };
+    if (cur && !cur.value) return err(`Enter your current ${S.security.weak_password ? "PIN" : "password"}`);
+    if (n1.length < 4) return err("Use at least 4 characters");
+    if (n1 !== n2) return err("The two new entries don't match");
+    if (S.security.remote && S.security.remote.enabled && n1.length < 8) return err("Internet Access is on, so use at least 8 characters");
     try {
       await api("POST", "/api/security/password", { current: cur ? cur.value : "", new: n1 });
       await reloadSecurity();
-      toast("Password saved");
-      openSheet({ type: "settings" });
-    } catch (err) { handleError(err, "Couldn't save"); }
+      toast(n1.length >= 8 ? "Password saved" : "PIN saved (home only)");
+      openSheet({ type: "settings", sub: S.afterPassword || undefined });
+      S.afterPassword = null;
+    } catch (e2) {
+      if (e2 instanceof AuthError) return showLogin();
+      $("#pwErr").textContent = e2.message;
+      toast(e2.message, true);
+    }
   });
 
   async function copyText(text, msg) {
@@ -1116,12 +1137,19 @@
     catch (e) { if (el) el.checked = !el.checked; handleError(e, "Couldn't change"); }
   }
   async function setRemote(on, el) {
+    const sec = S.security || {};
+    if (on && (!sec.has_password || sec.weak_password)) {
+      if (el) el.checked = false;
+      toast(sec.has_password ? "Your PIN is too short for the internet. Set an 8+ character password first." : "Set a password first", true);
+      S.afterPassword = "remote";
+      return openSheet({ type: "settings", sub: "password" });
+    }
     try { S.security.remote = await api("PUT", "/api/remote", { enabled: on }); renderSheet(); toast(on ? "Starting internet access…" : "Internet access off"); }
     catch (e) { if (el) el.checked = !on; handleError(e, "Couldn't change"); }
   }
 
   // after an input loses focus, catch up on any live updates we skipped while typing
-  sheetEl.addEventListener("focusout", () => setTimeout(() => { if (S.sheet) renderSheet(); }, 50));
+  sheetEl.addEventListener("focusout", () => setTimeout(() => { if (S.sheet && S.sheet.type === "acc") renderSheet(); }, 50));
 
   // drag the sheet down to dismiss (phones)
   let drag = null;

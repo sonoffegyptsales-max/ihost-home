@@ -412,7 +412,7 @@ def scan_network():
 class Tunnel:
     def __init__(self):
         self.proc = None
-        self.state = "off"     # off | downloading | starting | running | error
+        self.state = "off"     # off | downloading | starting | verifying | running | error
         self.url = ""
         self.error = ""
         self.gen = 0
@@ -480,9 +480,10 @@ class Tunnel:
                 m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", line)
                 if m and r["mode"] != "token":
                     self.url = m.group(0)
-                if "Registered tunnel connection" in line:
-                    self.state = "running"
-                elif " ERR " in line and self.state != "running":
+                if "Registered tunnel connection" in line and self.state not in ("verifying", "running"):
+                    self.state = "verifying"
+                    threading.Thread(target=self._verify, args=(gen,), daemon=True).start()
+                elif " ERR " in line and self.state not in ("verifying", "running"):
                     self.error = line.strip()[-240:]
             code = proc.wait()
             if gen == self.gen and CFG["remote"]["enabled"]:
@@ -494,6 +495,36 @@ class Tunnel:
                     self.start()
         except Exception as e:
             self.state, self.error = "error", str(e)
+
+    def _verify(self, gen):
+        """Only report 'running' once the public address really works. A brand-new trycloudflare name
+        needs a few seconds to appear in DNS; opening it too early makes phones cache the failure for
+        minutes. So ask Cloudflare's DNS over HTTPS (keeps this PC's DNS cache clean), then fetch it."""
+        host = urllib.parse.urlparse(self.url).hostname if self.url else None
+        deadline = time.time() + 180
+        resolved = False
+        while gen == self.gen and time.time() < deadline:
+            if not host:
+                self.state = "running"  # own domain without a configured address: nothing to probe
+                return
+            try:
+                if not resolved:
+                    req = urllib.request.Request(f"https://cloudflare-dns.com/dns-query?name={host}&type=A",
+                                                 headers={"Accept": "application/dns-json"})
+                    with urllib.request.urlopen(req, timeout=8) as resp:
+                        ans = json.loads(resp.read())
+                    resolved = ans.get("Status") == 0 and bool(ans.get("Answer"))
+                if resolved:
+                    with urllib.request.urlopen(self.url + "/api/session", timeout=10) as resp:
+                        if resp.status == 200:
+                            self.state = "running"
+                            return
+            except Exception:
+                pass
+            time.sleep(3)
+        if gen == self.gen and self.state == "verifying":
+            self.state = "running"  # couldn't confirm from here (e.g. DNS-over-HTTPS blocked); show it anyway
+            self.error = "Couldn't confirm the link from this computer yet - if it doesn't open, wait a minute and retry."
 
     def stop(self):
         with self.t_lock:
@@ -509,7 +540,8 @@ class Tunnel:
 
     def status(self):
         r = CFG["remote"]
-        return {"enabled": r["enabled"], "mode": r["mode"], "state": self.state, "url": self.url,
+        return {"enabled": r["enabled"], "mode": r["mode"], "state": self.state,
+                "url": self.url if self.state == "running" else "",
                 "error": self.error, "has_token": bool(r.get("tunnel_token")), "public_url": r.get("public_url", "")}
 
 
@@ -747,10 +779,12 @@ class Handler(BaseHTTPRequestHandler):
             if CFG["auth"]["password"] and not check_secret(str(b.get("current", "")), CFG["auth"]["password"]):
                 record_fail(self.client_ip())
                 return self.send_json({"error": "Current password is wrong"}, 403)
-            if len(new) < 8:
-                return self.send_json({"error": "Use at least 8 characters"}, 400)
+            if len(new) < 4:
+                return self.send_json({"error": "Use at least 4 characters"}, 400)
+            if CFG["remote"]["enabled"] and len(new) < 8:
+                return self.send_json({"error": "Internet access is on, so use at least 8 characters"}, 400)
             CFG["auth"]["password"] = hash_secret(new)
-            CFG["auth"]["legacy_pin"] = False
+            CFG["auth"]["legacy_pin"] = len(new) < 8  # short PINs are fine at home, too weak for the internet
             CFG["auth"]["epoch"] += 1  # sign out every other device
             save_config()
             return self.send_json({"ok": True}, extra_headers=self.new_session_header())
@@ -781,7 +815,7 @@ class Handler(BaseHTTPRequestHandler):
             if b.get("enabled") and not CFG["auth"]["password"]:
                 return self.send_json({"error": "Set a password before turning on internet access"}, 400)
             if b.get("enabled") and CFG["auth"].get("legacy_pin"):
-                return self.send_json({"error": "Your old PIN is too short for internet access. Set a new password (8+ characters) first."}, 400)
+                return self.send_json({"error": "Internet access needs a password of at least 8 characters. Change it under Password first."}, 400)
             if self.is_remote() and ("enabled" in b or "mode" in b or "tunnel_token" in b):
                 return self.send_json({"error": "Change internet access from the home network"}, 403)
             if b.get("mode") in ("quick", "token"):

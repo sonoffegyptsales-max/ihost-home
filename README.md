@@ -57,8 +57,11 @@ The app creates a secure HTTPS link through Cloudflare Tunnel:
 - No router changes or port forwarding.
 - Nothing to install: the connector (`cloudflared`) downloads automatically the first time.
 
-1. ••• → **Password**: set a password (8+ characters). It's required for every internet visitor.
-2. ••• → **Internet Access**: turn it on. After a few seconds **Your Link** appears, e.g. `https://xxxx.trycloudflare.com`.
+1. ••• → **Password**: set a password with at least 8 characters. It's required for every internet visitor.
+   A short PIN (4+ digits) is fine for home-only use. Turning on Internet Access sends you here first if your PIN is too short.
+2. ••• → **Internet Access**: turn it on. It shows *Getting your link ready…* until the new address works
+   (about 10–30 seconds), then **Your Link** appears, e.g. `https://xxxx.trycloudflare.com`.
+   Don't open the address before it appears: phones remember a failed lookup for a few minutes.
 3. Open that link on your phone anywhere and sign in with the password.
 
 Optional: **Sign-in Link** creates a link that signs a phone straight in without typing the password, for family members.
@@ -112,7 +115,8 @@ The dot next to ••• shows how updates arrive:
 - Changing the password or tapping **Sign Out All Other Devices** ends every other session.
 - From the internet you can control devices and rename things. You can't turn Internet Access off, add or remove iHosts, or scan the network.
 - Cross-site requests are blocked. Pages are sent with a strict Content-Security-Policy and can't be framed.
-- An old 4-digit PIN from version 1 keeps working at home. Internet Access asks you to replace it with a real password first.
+- A PIN (4+ characters) protects the app at home. Internet Access requires a password with 8+ characters.
+  An old PIN from version 1 keeps working at home until you change it.
 
 ## Where things are stored
 
@@ -152,6 +156,8 @@ python tests/ui_test_access.py http://127.0.0.1:8088 <password> ./shots
 
 - `tests/ui_test.py`: 24 headless-Chrome checks covering tiles, long-press, renaming, rooms, favorites, Turn Off All, live updates and layouts.
 - `tests/ui_test_access.py`: 25 checks covering home switching, the network scan, the sign-in page, simulated and **real** internet access through the tunnel, and the sign-in link. It needs a password set and Internet Access on.
+- `tests/ui_test_pin_internet.py`: 10 phone-style checks covering PIN change (including tapping outside the fields), the PIN-to-password upgrade, and turning on Internet Access, then signing in through the real public link.
+  Run it against a fresh data folder whose `config.json` has `"pin": "1234"`.
 - `tests/live_screens.py`: read-only screenshots against a running app.
 
 Both browser suites need Chrome and `pip install websocket-client`.
