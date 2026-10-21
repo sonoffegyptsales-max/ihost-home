@@ -1,14 +1,19 @@
 # iHost Home
 
-A HomeKit-style web app for your SONOFF iHost: see every switch's live status, turn things on and off,
-rename switches and channels, group them into rooms, and pick favorites. Works on phones (add to
-home screen), tablets and desktop. Light and dark mode follow the device.
+A HomeKit-style web app for SONOFF iHost hubs:
+
+- See every switch's live status and turn things on and off.
+- Rename switches and channels, group them into rooms, and pick favorites.
+- Connect to **any iHost by its IP address**, and to several homes at once.
+- Control everything **from home (LAN) or over the internet** with a secure link.
+
+Works on phones (add to home screen), tablets and desktop. Light and dark mode follow the device.
 
 No installs: Python 3.9+ standard library only. Nothing to build.
 
 ```
 ihost-home/
-  server.py          local server: serves the UI, proxies the iHost API, fans out live events
+  server.py          serves the UI, talks to the iHosts, fans out live events, runs the internet tunnel
   static/            the web app (HTML/CSS/vanilla JS, installable as a PWA)
   cli/               command-line tool for the same iHost
   tests/             fake iHost + browser tests
@@ -22,14 +27,59 @@ Double-click `start.bat`, or run:
 python server.py
 ```
 
-It prints two addresses:
+It prints the addresses to open:
 
-- `http://localhost:8088`: on this PC
-- `http://192.168.x.x:8088`: on your phone (same Wi-Fi)
+- `http://localhost:8088`: on this computer
+- `http://192.168.x.x:8088`: on phones and tablets on the same Wi-Fi
 
 The first time, Windows Firewall may ask about Python. Allow **Private networks** or phones can't connect.
 
-On iPhone, open the address in Safari, tap Share, then **Add to Home Screen**. It opens full-screen like an app.
+On iPhone, open the address in Safari, tap Share, then **Add to Home Screen**.
+
+## Connect an iHost (by its internal IP)
+
+1. Open the app. With no iHost yet it shows **Add iHost**. Otherwise tap the home name at the top, then **Add iHost…**
+2. The app scans your network and lists every iHost it finds, with its IP. Tap one, or type the IP (e.g. `192.168.1.50`).
+3. Give the home a name (e.g. *Villa · New Cairo*) and tap **Connect**.
+4. Open the iHost's own web page (`http://<iHost IP>`) and click **Done** on the popup asking to allow *iHost Home*.
+
+Repeat for more iHosts. Switch between homes by tapping the home name at the top.
+
+- **If an iHost gets a new IP:** use ••• → **Change IP Address / Pair Again…**, or simply add it again. The same iHost is recognised by its device ID and updated, not duplicated.
+- **Tip:** give each iHost a fixed IP (DHCP reservation) in the router.
+
+Adding or removing iHosts and scanning only work from the home network, never over the internet.
+
+## Control over the internet
+
+The app creates a secure HTTPS link through Cloudflare Tunnel:
+
+- No router changes or port forwarding.
+- Nothing to install: the connector (`cloudflared`) downloads automatically the first time.
+
+1. ••• → **Password**: set a password (8+ characters). It's required for every internet visitor.
+2. ••• → **Internet Access**: turn it on. After a few seconds **Your Link** appears, e.g. `https://xxxx.trycloudflare.com`.
+3. Open that link on your phone anywhere and sign in with the password.
+
+Optional: **Sign-in Link** creates a link that signs a phone straight in without typing the password, for family members.
+Creating a new link cancels the old one. **Sign Out All Other Devices** logs everyone out.
+
+Two kinds of address:
+
+| | Free Link (default) | Own Domain |
+|---|---|---|
+| Setup | none | free Cloudflare account + a domain |
+| Address | random `*.trycloudflare.com`, **changes when the app restarts** | fixed, e.g. `https://home.example.com` |
+| Updates | refresh every 3 seconds (Cloudflare's free links don't stream live events) | instant |
+| Intended for | trying it out, occasional use | everyday use |
+
+**Setting up your own domain:**
+1. In Cloudflare Zero Trust, go to Networks → Tunnels → **Create a tunnel** (type *Cloudflared*), then copy the token.
+2. Add a public hostname, e.g. `home.example.com`, with service `http://localhost:8088`.
+3. In the app: ••• → Internet Access → **Own Domain**. Paste the token and the address, tap **Save**, then turn Internet Access on.
+
+The computer running the app must stay on for internet access. While Internet Access is off, every request
+from outside is refused, even with a valid password.
 
 ## Using it
 
@@ -42,40 +92,46 @@ On iPhone, open the address in Safari, tap Share, then **Add to Home Screen**. I
 | Move to a room | Details, then **Room**, then pick one or type a new room |
 | Room off | **Turn Off** next to the room title |
 | Everything off | Tap the **Lights & Switches** chip, then **Turn Off All** |
-| Rename/remove rooms, hub info, PIN | **•••** button (top right) |
+| Switch home / add iHost | Tap the home name at the top |
+| Rooms, hub info, password, internet access | **•••** button (top right) |
 
-Live updates: changes made from the eWeLink app, wall buttons or automations appear within about a second.
-The green dot means the live connection is up.
+The dot next to ••• shows how updates arrive:
+
+- **Green:** live. Changes from wall buttons, the eWeLink app or automations appear within about a second.
+- **Orange:** refreshing every 3 seconds (the free internet link).
+
+## Security
+
+- The iHost tokens stay on the computer running the app. Browsers only talk to this server.
+- **At home**, the app opens without a password unless you turn on ••• → **Ask for Password at Home**.
+- **From the internet:**
+  - A password is always required.
+  - Requests are recognised by Cloudflare's headers, which visitors can't remove.
+  - Wrong passwords lock out an address after 5 tries (15 minutes), and all internet logins after 30 failures in an hour.
+- Passwords are stored as PBKDF2-SHA256 hashes. Sessions are signed cookies (`HttpOnly`, `SameSite=Strict`, `Secure` over HTTPS) that last 90 days.
+- Changing the password or tapping **Sign Out All Other Devices** ends every other session.
+- From the internet you can control devices and rename things. You can't turn Internet Access off, add or remove iHosts, or scan the network.
+- Cross-site requests are blocked. Pages are sent with a strict Content-Security-Policy and can't be framed.
+- An old 4-digit PIN from version 1 keeps working at home. Internet Access asks you to replace it with a real password first.
 
 ## Where things are stored
 
 | What | Where |
 |---|---|
-| Device names | On the iHost (shows in the iHost console and eWeLink) |
-| Channel names | iHost tags `toggle` (documented iHost mechanism) |
-| Rooms | iHost tag `room` (also used by `ihost-control`: `ihost off tag:room=Kitchen`) |
-| Favorites, icons, home name | `prefs.json` here |
-| iHost address + token, PIN | `config.json` here (keep private) |
+| Device names | On the iHost (also shows in the iHost console and eWeLink) |
+| Channel names | iHost tags `toggle` |
+| Rooms | iHost tag `room` (also used by the CLI: `ihost off tag:room=Kitchen`) |
+| iHosts (IP, token, name), password hash, internet settings | `config.json` (keep private, never commit) |
+| Favorites and icons per home | `prefs.json` |
+| Cloudflare connector | `bin/cloudflared(.exe)` (downloaded on first use) |
 
-## Security
-
-- The iHost token stays on this PC. Browsers only talk to this server.
-- Set an **Access PIN** in ••• → Security so other people on the Wi-Fi can't control the house.
-  Wrong PINs are rate-limited (5 tries per 5 minutes).
-- Cross-site requests are blocked.
-- Don't expose port 8088 to the internet. Use a VPN (e.g. Tailscale) for remote access.
-
-## Settings (`config.json`)
-
-`host`, `token` (set by pairing), `port` (default 8088), `bind` (`0.0.0.0` = reachable on the LAN,
-`127.0.0.1` = this PC only), `pin`.
-
-To pair a different iHost: ••• → **Pair Again…**, then click **Done** in the iHost web console.
+Set `IHOST_HOME_DATA=<folder>` to keep `config.json`, `prefs.json` and `bin/` somewhere else.
+`port` (default 8088) and `bind` (`0.0.0.0` = LAN, `127.0.0.1` = this computer only) are in `config.json`.
 
 ## Command-line tool
 
-`cli/ihost.py` controls the same iHost from a terminal (list, on/off/toggle by name, room or category,
-scenes, live event watch). See `cli/README.md`.
+`cli/ihost.py` controls an iHost from a terminal (list, on/off/toggle by name, room or category, scenes,
+live event watch). See `cli/README.md`.
 
 ```
 python cli/ihost.py token --host 192.168.1.50
@@ -87,16 +143,21 @@ python cli/ihost.py off tag:room=Kitchen
 Without a real iHost:
 
 ```
-python tests/mock_ihost.py 8765                     # fake iHost with sample devices
-# config.json: {"host": "http://127.0.0.1:8765", "token": "test-token-123", "port": 8099}
-python server.py
-python tests/ui_test.py http://127.0.0.1:8099 http://127.0.0.1:8765 ./shots
+python tests/mock_ihost.py 8765          # fake iHost #1
+python tests/mock_ihost.py 8766          # fake iHost #2
+IHOST_HOME_DATA=./testdata python server.py   # then add both (127.0.0.1:8765 / :8766) in the app
+python tests/ui_test.py http://127.0.0.1:8088 http://127.0.0.1:8765 ./shots
+python tests/ui_test_access.py http://127.0.0.1:8088 <password> ./shots
 ```
 
-- `tests/ui_test.py`: 24 headless-Chrome checks (needs Chrome and `pip install websocket-client`).
-- `tests/live_screens.py`: read-only screenshots against the running app.
+- `tests/ui_test.py`: 24 headless-Chrome checks covering tiles, long-press, renaming, rooms, favorites, Turn Off All, live updates and layouts.
+- `tests/ui_test_access.py`: 25 checks covering home switching, the network scan, the sign-in page, simulated and **real** internet access through the tunnel, and the sign-in link. It needs a password set and Internet Access on.
+- `tests/live_screens.py`: read-only screenshots against a running app.
+
+Both browser suites need Chrome and `pip install websocket-client`.
 
 ## iHost API notes (firmware 2.14.1)
 
 - `access_token` needs `?app_name=` (not in the docs).
+- `GET /open-api/v2/rest/bridge` answers without a token. The network scan uses it to recognise iHosts.
 - Tag updates are a shallow merge of top-level keys. A key can only be cleared by sending it as `null`.

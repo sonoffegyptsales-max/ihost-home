@@ -1,6 +1,6 @@
 /* iHost Home — client. Vanilla JS, no build step.
-   Data model: raw iHost device objects (from /api/devices) -> "accessories" (one per switch channel,
-   one per single-relay device, one per sensor). Live updates arrive over /api/events (SSE). */
+   Data model: raw iHost device objects (from /api/hubs/<id>/devices) -> "accessories" (one per switch channel,
+   one per single-relay device, one per sensor). Live updates arrive over /api/hubs/<id>/events (SSE). */
 (() => {
   "use strict";
 
@@ -28,7 +28,11 @@
   // ------------------------------------------------------------------ state
   const S = {
     devices: [],
-    prefs: { favorites: [], icons: {}, home_name: "My Home" },
+    prefs: { favorites: [], icons: {} },
+    hubs: [],         // every iHost this server knows
+    hub: null,        // id of the iHost being shown
+    session: {},      // {remote, login_required, authed, ...}
+    security: {},     // password / sign-in link / internet access status
     status: null,
     view: HOME,
     live: false,
@@ -58,6 +62,10 @@
     }
     return data;
   }
+
+  const hp = (p) => `/api/hubs/${encodeURIComponent(S.hub)}${p}`;
+  const currentHub = () => S.hubs.find((h) => h.id === S.hub) || {};
+  const homeName = () => currentHub().name || "My Home";
 
   // ------------------------------------------------------------------ model
   const caps = (d) => d.capabilities || [];
@@ -157,10 +165,12 @@
 
   // ------------------------------------------------------------------ render: page
   function render() {
-    $("#homeTitle").textContent = S.prefs.home_name || "My Home";
-    document.title = S.prefs.home_name || "Home";
+    $("#homeTitle").innerHTML = `${esc(homeName())}<svg class="title-chev" viewBox="0 0 12 8" aria-hidden="true"><path d="M1 1.5l5 5 5-5"/></svg>`;
+    $("#homeTitle").setAttribute("aria-label", `${homeName()}, switch home`);
+    document.title = homeName();
     $("#liveDot").classList.toggle("on", S.live);
-    $("#liveDot").title = S.live ? "Live updates connected" : "Live updates offline";
+    $("#liveDot").classList.toggle("poll", !S.live && !!S.polling);
+    $("#liveDot").title = S.live ? "Live updates connected" : S.polling ? "Updating every 3 seconds" : "Live updates offline";
     renderNav();
     renderChips();
     renderContent();
@@ -263,7 +273,7 @@
     S.busy.add(a.key);
     render();
     try {
-      await api("PUT", `/api/devices/${encodeURIComponent(a.sn)}`, { state: patch });
+      await api("PUT", hp(`/devices/${encodeURIComponent(a.sn)}`), { state: patch });
       return true;
     } catch (e) {
       applyLocal(a.sn, stateFor(a, prev));
@@ -290,7 +300,7 @@
     if (!name || name === a.name) return;
     try {
       if (a.ch != null && a.multi) {
-        await api("PATCH", `/api/devices/${encodeURIComponent(a.sn)}/tags`, { toggle: { [a.ch]: name } });
+        await api("PATCH", hp(`/devices/${encodeURIComponent(a.sn)}/tags`), { toggle: { [a.ch]: name } });
         const d = findDev(a.sn);
         d.tags = d.tags || {};
         d.tags.toggle = { ...(d.tags.toggle || {}), [a.ch]: name };
@@ -307,7 +317,7 @@
     const d = findDev(sn);
     if (!d || !name || name === d.name) return;
     try {
-      await api("PUT", `/api/devices/${encodeURIComponent(sn)}`, { name });
+      await api("PUT", hp(`/devices/${encodeURIComponent(sn)}`), { name });
       d.name = name;
       toast("Name saved");
     } catch (e) { handleError(e, "Couldn't rename"); }
@@ -318,7 +328,7 @@
     if (!d) return;
     const value = room === DEFAULT_ROOM ? null : room;
     try {
-      await api("PATCH", `/api/devices/${encodeURIComponent(sn)}/tags`, { room: value });
+      await api("PATCH", hp(`/devices/${encodeURIComponent(sn)}/tags`), { room: value });
       d.tags = d.tags || {};
       if (value) d.tags.room = value; else delete d.tags.room;
       toast(`Moved to ${room}`);
@@ -332,7 +342,7 @@
     let fails = 0;
     for (const d of devs) {
       try {
-        await api("PATCH", `/api/devices/${encodeURIComponent(d.serial_number)}/tags`, { room: newName === DEFAULT_ROOM ? null : newName });
+        await api("PATCH", hp(`/devices/${encodeURIComponent(d.serial_number)}/tags`), { room: newName === DEFAULT_ROOM ? null : newName });
         d.tags = d.tags || {};
         if (newName === DEFAULT_ROOM) delete d.tags.room; else d.tags.room = newName;
       } catch { fails++; }
@@ -344,7 +354,7 @@
   async function savePrefs(patch) {
     Object.assign(S.prefs, patch);
     render();
-    try { S.prefs = await api("PUT", "/api/prefs", patch); } catch (e) { handleError(e, "Couldn't save"); }
+    try { S.prefs = await api("PUT", hp("/prefs"), patch); } catch (e) { handleError(e, "Couldn't save"); }
   }
   function toggleFavorite(key) {
     const f = new Set(S.prefs.favorites);
@@ -386,6 +396,7 @@
     if (sp.type === "acc") html = accSheet(sp);
     else if (sp.type === "settings") html = settingsSheet(sp);
     else if (sp.type === "list") html = listSheet(sp);
+    else if (sp.type === "homes") html = homesSheet();
     if (html == null) { closeSheet(); return; }
     inner.innerHTML = html;
     inner.scrollTop = scroll;
@@ -493,7 +504,7 @@
     if (sp.which === "on") { list = all.filter((a) => a.kind === "switch" && !a.cover && a.online && a.on); title = "On Now"; empty = "Everything is off."; }
     else if (sp.which === "sensors") { list = all.filter((a) => a.kind === "sensor"); title = "Sensors"; empty = "No sensors."; }
     else { list = all.filter((a) => !a.online); title = "No Response"; empty = "All accessories are responding."; }
-    let h = head(null, false, title, S.view === HOME ? (S.prefs.home_name || "My Home") : S.view);
+    let h = head(null, false, title, S.view === HOME ? homeName() : S.view);
     if (!list.length) return h + `<div class="empty">${empty}</div>`;
     h += `<div class="group">${list.map((a) => `<div class="row">
       <span class="mini-ico ${a.on && a.online ? "on" : ""}" style="--accent:${ACCENT[a.icon]}">${svg(a.icon)}</span>
@@ -506,6 +517,8 @@
   function settingsSheet(sp) {
     const s = S.status || {};
     const b = s.bridge || {};
+    const sec = S.security || {};
+    const remoteSession = !!S.session.remote;
     if (sp.sub === "room") {
       const n = S.devices.filter((d) => roomOf(d) === sp.room).length;
       let h = head(null, false, sp.room, `${n} device${n === 1 ? "" : "s"}`, null, "back");
@@ -514,91 +527,234 @@
       if (sp.room !== DEFAULT_ROOM) h += `<div style="margin-top:8px"><button class="btn danger" data-act="remove-room">Remove Room</button></div><div class="group-foot" style="text-align:center">Accessories move to ${DEFAULT_ROOM}.</div>`;
       return h;
     }
-    if (sp.sub === "pin") {
-      let h = head(null, false, "Access PIN", "Protects this page on your network", null, "back");
-      h += `<div class="group-foot" style="margin:6px 4px 12px">Anyone opening this app on another device will need the PIN once. Leave empty and save to turn it off.</div>
-        <input class="field pin" id="pinInput" inputmode="numeric" pattern="[0-9]*" maxlength="8" placeholder="••••" autocomplete="new-password" aria-label="New PIN">
-        <button class="btn" data-act="save-pin">Save PIN</button>`;
+    if (sp.sub === "password") {
+      let h = head(null, false, sec.has_password ? "Change Password" : "Set Password", "For signing in from outside your home", null, "back");
+      h += `<form data-form="password" style="margin-top:6px" autocomplete="on">
+        <input type="text" name="username" value="ihost-home" autocomplete="username" hidden>
+        ${sec.has_password ? `<input class="field" id="pwCurrent" type="password" placeholder="${sec.weak_password ? "Current PIN" : "Current password"}" autocomplete="current-password" aria-label="Current password">` : ""}
+        <input class="field" id="pwNew" type="password" placeholder="New password (at least 8 characters)" autocomplete="new-password" aria-label="New password">
+        <input class="field" id="pwNew2" type="password" placeholder="Repeat new password" autocomplete="new-password" aria-label="Repeat new password">
+        <button class="btn" type="submit">Save Password</button></form>
+        <div class="group-foot" style="margin-top:10px">Saving signs out every other phone and browser.</div>`;
       return h;
     }
+    if (sp.sub === "remote") return remoteSheet(sec);
+    if (sp.sub === "hub-remove") {
+      let h = head(null, false, "Remove iHost", homeName(), null, "back");
+      h += `<p class="group-foot" style="margin:8px 4px 16px;font-size:15px">This only removes the connection from this app. Devices, names and rooms stay on the iHost, and you can add it again any time.</p>
+        <button class="btn" style="background:var(--red)" data-act="remove-hub-confirm">Remove ${esc(homeName())}</button>`;
+      return h;
+    }
+
     let h = head("home", false, "Home Settings", null, null);
-    h += `<div class="group"><label class="row"><span class="lbl">Name</span><input class="inline" id="homeName" value="${esc(S.prefs.home_name || "My Home")}" maxlength="40" enterkeyhint="done" aria-label="Home name"></label></div>`;
+    h += `<div class="group"><label class="row"><span class="lbl">Home Name</span><input class="inline" id="homeName" value="${esc(homeName())}" maxlength="40" enterkeyhint="done" aria-label="Home name"></label>
+      <button class="row tap" data-act="homes"><span class="lbl">Homes</span><span class="val">${S.hubs.length}</span>${chev}</button></div>`;
+
     const rs = rooms();
     h += `<div class="group-label">Rooms</div><div class="group">${rs.map((r) => {
       const n = S.devices.filter((d) => roomOf(d) === r).length;
       return `<button class="row tap" data-edit-room="${esc(r)}"><span class="lbl">${esc(r)}</span><span class="val">${n}</span>${chev}</button>`;
     }).join("")}</div><div class="group-foot">Put accessories in rooms from each accessory's settings (long-press a tile).</div>`;
-    h += `<div class="group-label">Hub</div><div class="group">
-      <div class="row"><span class="lbl">iHost</span><span class="val">${esc(b.name || "iHost")}</span></div>
-      <div class="row"><span class="lbl">Address</span><span class="val">${esc(b.ip || s.host || "—")}</span></div>
+
+    h += `<div class="group-label">iHost</div><div class="group">
+      <div class="row"><span class="lbl">Hub</span><span class="val">${esc(b.name || "iHost")}</span></div>
+      <div class="row"><span class="lbl">IP Address</span><span class="val">${esc(b.ip || currentHub().host || "—")}</span></div>
       ${b.fw_version ? `<div class="row"><span class="lbl">Firmware</span><span class="val">${esc(b.fw_version)}</span></div>` : ""}
       ${b.mac ? `<div class="row"><span class="lbl">MAC</span><span class="val mono">${esc(b.mac)}</span></div>` : ""}
-      <div class="row"><span class="lbl">Live Updates</span><span class="val" style="color:${S.live ? "var(--green)" : "var(--red)"}">${S.live ? "Connected" : "Disconnected"}</span></div>
+      <div class="row"><span class="lbl">Live Updates</span><span class="val" style="color:${S.live ? "var(--green)" : S.polling ? "var(--orange)" : "var(--red)"}">${S.live ? "Instant" : S.polling ? "Every 3 seconds" : "Disconnected"}</span></div>
       <div class="row"><span class="lbl">Accessories</span><span class="val">${S.devices.length} devices · ${accessories().length} tiles</span></div>
-      <button class="row tap action" data-act="repair"><span class="lbl">Pair Again…</span></button>
+      ${remoteSession ? "" : `<button class="row tap action" data-act="repair"><span class="lbl">Change IP Address / Pair Again…</span></button>
+      <button class="row tap" style="color:var(--red)" data-act="remove-hub"><span class="lbl">Remove This iHost…</span></button>`}
     </div>`;
-    h += `<div class="group-label">Security</div><div class="group">
-      <button class="row tap" data-act="pin"><span class="lbl">Access PIN</span><span class="val">${s.pin_enabled ? "On" : "Off"}</span>${chev}</button></div>`;
+
+    const rem = sec.remote || {};
+    const remState = rem.enabled ? (rem.state === "running" ? "On" : rem.state === "error" ? "Problem" : "Starting…") : "Off";
+    h += `<div class="group-label">Access</div><div class="group">
+      <button class="row tap" data-act="remote"><span class="lbl">Internet Access</span><span class="val" style="${rem.enabled && rem.state === "running" ? "color:var(--green)" : ""}">${remState}</span>${chev}</button>
+      <button class="row tap" data-act="password"><span class="lbl">Password</span><span class="val">${sec.weak_password ? "PIN (upgrade)" : sec.has_password ? "Change" : "Not Set"}</span>${chev}</button>
+      <div class="row"><span class="lbl">Ask for Password at Home</span>${iosSwitch('data-act="lan-login"', sec.lan_login, !sec.has_password, "Ask for password at home")}</div>
+      <button class="row tap action" data-act="signout-all"><span class="lbl">Sign Out All Other Devices</span></button>
+      ${S.session.login_required ? `<button class="row tap" style="color:var(--red)" data-act="signout"><span class="lbl">Sign Out</span></button>` : ""}
+    </div><div class="group-foot">At home, the app opens without a password unless you turn it on. From the internet, a password is always required.</div>`;
+    return h;
+  }
+
+  function remoteSheet(sec) {
+    const rem = sec.remote || {};
+    const remoteSession = !!S.session.remote;
+    const stateText = { off: "Off", downloading: "Downloading connector…", starting: "Connecting…", running: "Connected", error: "Problem" }[rem.state] || rem.state;
+    let h = head(null, false, "Internet Access", "Control this home from anywhere", null, "back");
+    h += `<div class="group" style="margin-top:6px">
+      <div class="row"><span class="lbl">Internet Access</span>${iosSwitch('data-act="remote-toggle"', rem.enabled, !sec.has_password || sec.weak_password || remoteSession, "Internet access")}</div>
+      ${rem.enabled ? `<div class="row"><span class="lbl">Status</span><span class="val" style="color:${rem.state === "running" ? "var(--green)" : rem.state === "error" ? "var(--red)" : "var(--ink-2)"}">${esc(stateText)}</span></div>` : ""}
+    </div>`;
+    if (!sec.has_password) h += `<div class="group-foot">Set a password first. Anyone opening the link must enter it.</div><div style="margin-top:12px"><button class="btn" data-act="password">Set Password</button></div>`;
+    else if (sec.weak_password) h += `<div class="group-foot">Your current PIN is too short to protect the home on the internet. Set a password with at least 8 characters first.</div><div style="margin-top:12px"><button class="btn" data-act="password">Set New Password</button></div>`;
+    else if (remoteSession) h += `<div class="group-foot">You're connected over the internet. Turn this on or off from home.</div>`;
+    else h += `<div class="group-foot">Uses a secure Cloudflare tunnel. No router or port-forwarding changes needed. This computer must stay on.</div>`;
+    if (rem.error && rem.enabled) h += `<div class="group-foot" style="color:var(--red)">${esc(rem.error)}</div>`;
+
+    if (rem.url) {
+      h += `<div class="group-label">Your Link</div><div class="group">
+        <div class="row"><span class="lbl mono" style="font-size:14px;white-space:normal;word-break:break-all;user-select:all">${esc(rem.url)}</span></div>
+        <button class="row tap action" data-act="copy-url"><span class="lbl">Copy Link</span></button></div>
+        <div class="group-foot">${rem.mode === "token" ? "Your permanent address." : "Free link. It changes when this computer or the app restarts. For a permanent address use your own domain below."}</div>`;
+    }
+
+    const linkBase = rem.url || location.origin;
+    h += `<div class="group-label">Sign-in Link</div><div class="group">
+      ${S.newLink ? `<div class="row"><span class="lbl mono" style="font-size:13px;white-space:normal;word-break:break-all;user-select:all">${esc(linkBase + "/login?key=" + S.newLink)}</span></div>
+        <button class="row tap action" data-act="copy-link"><span class="lbl">Copy Sign-in Link</span></button>` : ""}
+      <button class="row tap action" data-act="make-link"><span class="lbl">${sec.has_link ? "Create New Sign-in Link" : "Create Sign-in Link"}</span></button>
+      ${sec.has_link ? `<button class="row tap" style="color:var(--red)" data-act="revoke-link"><span class="lbl">Turn Off Sign-in Link</span></button>` : ""}
+    </div><div class="group-foot">Opens the app without typing the password. Share only with family. Creating a new link turns off the old one.${S.newLink ? " The link is shown once, so copy it now." : ""}</div>`;
+
+    if (!remoteSession) {
+      const tokenMode = rem.mode === "token";
+      h += `<div class="group-label">Address Type</div>
+        <div class="segmented" role="group" aria-label="Address type">
+          <button data-mode="quick" aria-pressed="${!tokenMode}">Free Link</button>
+          <button data-mode="token" aria-pressed="${tokenMode}">Own Domain</button></div>`;
+      if (tokenMode) {
+        h += `<div class="group" style="margin-top:12px">
+          <label class="row"><span class="lbl">Tunnel Token</span><input class="inline" id="tunToken" type="password" placeholder="${rem.has_token ? "saved - paste to replace" : "paste token"}" autocomplete="off" aria-label="Cloudflare tunnel token"></label>
+          <label class="row"><span class="lbl">Address</span><input class="inline" id="tunUrl" value="${esc(rem.public_url || "")}" placeholder="home.example.com" autocomplete="off" aria-label="Public address"></label></div>
+          <div style="margin-top:12px"><button class="btn secondary" data-act="save-tunnel">Save</button></div>
+          <div class="group-foot">In Cloudflare Zero Trust: Networks → Tunnels → Create a tunnel → copy the token. Add a public hostname pointing to <b>http://localhost:${location.port || 80}</b>.</div>`;
+      }
+    }
+    return h;
+  }
+
+  function homesSheet() {
+    let h = head(null, false, "Homes", `${S.hubs.length} iHost${S.hubs.length === 1 ? "" : "s"}`);
+    h += `<div class="group" style="margin-top:6px">${S.hubs.map((x) => `<button class="row tap" data-hub="${esc(x.id)}">
+        <span class="lbl">${esc(x.name)}<div style="font-size:13px;color:var(--ink-2)">${esc(x.host)}</div></span>
+        <span class="live-dot ${x.live ? "on" : ""}" title="${x.live ? "Connected" : "Not connected"}"></span>
+        ${x.id === S.hub ? checkMark : ""}</button>`).join("")}</div>`;
+    if (!S.session.remote) h += `<div style="margin-top:14px"><button class="btn secondary" data-act="add-hub">Add iHost…</button></div>
+      <div class="group-foot" style="text-align:center">Add any iHost on this network by its IP address.</div>`;
     return h;
   }
 
   // ------------------------------------------------------------------ full-page states
-  function showPairing(prefill, msg) {
+  function pageMode() {
     S.loaded = false;
+    if (S.sheet) closeSheet();
     $("#roomsNav").innerHTML = ""; $("#chips").hidden = true;
-    $("#content").innerHTML = `<div class="center-card">
-      <div class="big-ico"><img src="/icon.svg" width="64" height="64" alt=""></div>
-      <h2>Connect to iHost</h2>
-      <p>Enter the address of your SONOFF iHost on this network.</p>
-      <input class="field" id="hostInput" value="${esc(prefill || "ihost.local")}" autocomplete="off" spellcheck="false" aria-label="iHost address">
-      <button class="btn" id="pairBtn">Connect</button>
-      ${msg ? `<p style="color:var(--red);margin:14px 0 0">${esc(msg)}</p>` : ""}
-    </div>`;
-    $("#pairBtn").onclick = startPair;
-    $("#hostInput").onkeydown = (e) => { if (e.key === "Enter") startPair(); };
+    if (es) { es.close(); es = null; }
   }
-  async function startPair() {
-    const host = $("#hostInput").value.trim();
-    if (!host) return;
-    try { await api("POST", "/api/pair", { host }); } catch (e) { return showPairing(host, e.message); }
+
+  let pairJob = null;
+  function showAddHub(opts = {}) {
+    pageMode();
+    const cancel = S.hubs.length ? `<div style="margin-top:8px"><button class="btn secondary" id="cancelAdd">Cancel</button></div>` : "";
+    if (S.session.remote) {
+      $("#content").innerHTML = `<div class="center-card"><h2>Add iHost</h2><p>New iHosts can only be added from the home network.</p>${cancel}</div>`;
+      if (cancel) $("#cancelAdd").onclick = boot;
+      return;
+    }
+    $("#content").innerHTML = `<div class="center-card wide">
+      <div class="big-ico"><img src="/icon.svg" width="64" height="64" alt=""></div>
+      <h2>${opts.title || "Add iHost"}</h2>
+      <p>The iHost and this computer must be on the same network.</p>
+      <div class="group-label" style="text-align:left;margin-left:4px">Found on Your Network</div>
+      <div class="group" id="scanList"><div class="row"><span class="spinner" style="margin:0;width:18px;height:18px"></span><span class="lbl" style="color:var(--ink-2)">Searching…</span></div></div>
+      <div style="text-align:right;margin:6px 2px 0"><button class="link-btn" id="rescan">Search Again</button></div>
+      <div class="group-label" style="text-align:left;margin-left:4px">Or Enter the IP Address</div>
+      <input class="field" id="hostInput" value="${esc(opts.host || "")}" placeholder="192.168.1.50" autocomplete="off" spellcheck="false" inputmode="decimal" aria-label="iHost IP address">
+      <input class="field" id="nameInput" value="${esc(opts.name || "")}" placeholder="Name, e.g. Villa · New Cairo" maxlength="40" autocomplete="off" aria-label="Home name">
+      <button class="btn" id="pairBtn">Connect</button>${cancel}
+      ${opts.msg ? `<p style="color:var(--red);margin:14px 0 0">${esc(opts.msg)}</p>` : ""}
+    </div>`;
+    $("#pairBtn").onclick = () => startPair($("#hostInput").value.trim(), $("#nameInput").value.trim());
+    $("#hostInput").onkeydown = (e) => { if (e.key === "Enter") $("#pairBtn").click(); };
+    $("#rescan").onclick = runScan;
+    if (cancel) $("#cancelAdd").onclick = boot;
+    runScan();
+  }
+
+  async function runScan() {
+    const list = $("#scanList");
+    if (!list) return;
+    list.innerHTML = `<div class="row"><span class="spinner" style="margin:0;width:18px;height:18px"></span><span class="lbl" style="color:var(--ink-2)">Searching your network…</span></div>`;
+    try {
+      const { found, networks } = await api("POST", "/api/scan");
+      if (!$("#scanList")) return;
+      if (!found.length) {
+        list.innerHTML = `<div class="row"><span class="lbl" style="color:var(--ink-2);white-space:normal">No iHost found on ${esc((networks || []).map((n) => n.replace(/\.\d+$/, ".x")).join(", ") || "this network")}. Enter its IP below.</span></div>`;
+        return;
+      }
+      list.innerHTML = found.map((f) => `<button class="row tap" data-pick-ip="${esc(f.ip)}" data-pick-name="${esc(f.paired_as || "")}">
+        <span class="mini-ico on" style="--accent:#ff9f0a">${svg("home")}</span>
+        <span class="lbl">${esc(f.name)} · ${esc(f.ip)}<div style="font-size:13px;color:var(--ink-2)">${f.paired_as ? `Added as “${esc(f.paired_as)}” · tap to pair again` : `Firmware ${esc(f.fw || "?")}`}</div></span>${chev}</button>`).join("");
+      list.querySelectorAll("[data-pick-ip]").forEach((b) => b.onclick = () => {
+        $("#hostInput").value = b.dataset.pickIp;
+        if (!$("#nameInput").value && b.dataset.pickName) $("#nameInput").value = b.dataset.pickName;
+        $("#nameInput").focus();
+      });
+    } catch (e) {
+      if (e instanceof AuthError) return showLogin();
+      list.innerHTML = `<div class="row"><span class="lbl" style="color:var(--red)">${esc(e.message)}</span></div>`;
+    }
+  }
+
+  async function startPair(host, name) {
+    if (!host) { $("#hostInput").focus(); return; }
+    let job;
+    try { job = (await api("POST", "/api/pair", { host, name })).job; } catch (e) { return showAddHub({ host, name, msg: e.message }); }
+    pairJob = job;
     $("#content").innerHTML = `<div class="center-card">
-      <div class="spinner"></div><h2>Waiting for approval</h2>
-      <ol class="steps"><li>Open <b>http://${esc(host)}</b> in a browser on this network.</li>
-      <li>A popup asks to allow <b>iHost Home</b>. Click <b>Done</b>.</li><li>This page continues automatically.</li></ol>
-      <p style="margin:0">You have 5 minutes.</p></div>`;
-    for (;;) {
+      <div class="spinner"></div><h2 id="pairTitle">Connecting to ${esc(host)}…</h2>
+      <ol class="steps"><li>Open <a href="${esc(/^https?:/.test(host) ? host : "http://" + host)}" target="_blank" rel="noopener" style="color:var(--blue)">${esc(host)}</a> in a browser on this network.</li>
+      <li>A popup asks to allow <b>iHost Home</b>. Click <b>Done</b>.</li><li>This page continues by itself.</li></ol>
+      <p style="margin:0 0 14px">You have 5 minutes.</p><button class="btn secondary" id="cancelPair">Cancel</button></div>`;
+    $("#cancelPair").onclick = async () => { pairJob = null; try { await api("DELETE", `/api/pair/${job}`); } catch { /* ignore */ } showAddHub({ host, name }); };
+    while (pairJob === job) {
       await new Promise((r) => setTimeout(r, 2000));
-      let p;
-      try { p = await api("GET", "/api/pair"); } catch { continue; }
-      if (p.state === "done") { toast("Connected to iHost"); return boot(); }
-      if (p.state !== "waiting") return showPairing(host, p.message);
+      if (pairJob !== job) return;
+      let st;
+      try { st = await api("GET", `/api/pair/${job}`); } catch { continue; }
+      if (st.state === "waiting" && $("#pairTitle")) $("#pairTitle").textContent = `Waiting for approval on ${st.bridge && st.bridge.name || "iHost"}`;
+      if (st.state === "done") {
+        pairJob = null;
+        localStorage.setItem("ihhHub", st.hub.id);
+        toast(`Connected to ${st.hub.name}`);
+        return boot();
+      }
+      if (["error", "timeout"].includes(st.state)) { pairJob = null; return showAddHub({ host, name, msg: st.message }); }
+      if (st.state === "cancelled") return;
     }
   }
 
   function showLogin(msg) {
-    S.loaded = false;
-    $("#roomsNav").innerHTML = ""; $("#chips").hidden = true;
+    pageMode();
+    $("#homeTitle").textContent = "Home";
     $("#content").innerHTML = `<div class="center-card">
       <div class="big-ico"><img src="/icon.svg" width="64" height="64" alt=""></div>
-      <h2>Enter PIN</h2><p>This home is protected.</p>
-      <input class="field pin" id="pinLogin" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="current-password" aria-label="PIN">
-      <button class="btn" id="loginBtn">Unlock</button>
+      <h2>Sign In</h2><p>${S.session.remote ? "You're connecting from outside the home." : "This home is protected."}</p>
+      <form id="loginForm" autocomplete="on">
+        <input type="text" name="username" value="ihost-home" autocomplete="username" hidden>
+        <input class="field" id="pwLogin" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password">
+        <button class="btn" type="submit">Sign In</button></form>
       ${msg ? `<p style="color:var(--red);margin:14px 0 0">${esc(msg)}</p>` : ""}</div>`;
-    const go = async () => {
-      try { await api("POST", "/api/login", { pin: $("#pinLogin").value }); boot(); }
-      catch (e) { showLogin(e.message); }
+    $("#loginForm").onsubmit = async (e) => {
+      e.preventDefault();
+      try { await api("POST", "/api/login", { password: $("#pwLogin").value }); boot(); }
+      catch (err) { showLogin(err.message); }
     };
-    $("#loginBtn").onclick = go;
-    $("#pinLogin").onkeydown = (e) => { if (e.key === "Enter") go(); };
-    setTimeout(() => $("#pinLogin").focus(), 50);
+    setTimeout(() => $("#pwLogin") && $("#pwLogin").focus(), 50);
   }
 
   function showGatewayError(msg) {
+    pageMode();
     $("#content").innerHTML = `<div class="center-card"><div class="big-ico" style="display:grid;place-items:center;background:var(--group-2);color:var(--red)"><svg viewBox="0 0 24 24" width="34" height="34" fill="currentColor">${P.warn}</svg></div>
-      <h2>Can't reach iHost</h2><p>${esc(msg)}</p><button class="btn" id="retryBtn">Try Again</button>
-      <div style="margin-top:8px"><button class="btn secondary" id="repairBtn">Change Address</button></div></div>`;
+      <h2>Can't reach ${esc(homeName())}</h2><p>${esc(msg)}</p><button class="btn" id="retryBtn">Try Again</button>
+      ${S.session.remote ? "" : `<div style="margin-top:8px"><button class="btn secondary" id="repairBtn">Change IP Address</button></div>`}
+      ${S.hubs.length > 1 ? `<div style="margin-top:8px"><button class="btn secondary" id="otherHome">Switch Home</button></div>` : ""}</div>`;
     $("#retryBtn").onclick = boot;
-    $("#repairBtn").onclick = () => showPairing(S.status && S.status.host);
+    if ($("#repairBtn")) $("#repairBtn").onclick = () => showAddHub({ title: "Change IP Address", host: currentHub().host, name: currentHub().name });
+    if ($("#otherHome")) $("#otherHome").onclick = (e) => openSheet({ type: "homes" }, e.currentTarget);
   }
 
   // ------------------------------------------------------------------ feedback
@@ -625,7 +781,7 @@
   let refreshTimer;
   async function refresh() {
     try {
-      const { devices } = await api("GET", "/api/devices");
+      const { devices } = await api("GET", hp("/devices"));
       S.devices = devices;
       banner(null);
       render();
@@ -636,11 +792,27 @@
   }
   const scheduleRefresh = () => { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, 400); };
 
-  let es;
+  let es, pollTimer = null, sseWatch = null;
+  function startPolling() {
+    if (es) { es.close(); es = null; }
+    if (pollTimer) return;
+    S.live = false; S.polling = true;
+    pollTimer = setInterval(() => { if (S.loaded && !document.hidden) refresh(); }, 3000);
+    if (S.loaded) render();
+  }
+  function stopPolling() {
+    clearInterval(pollTimer); pollTimer = null; S.polling = false;
+  }
   function connectEvents() {
     if (es) es.close();
-    es = new EventSource("/api/events");
+    stopPolling();
+    clearTimeout(sseWatch);
+    let gotFirst = false;
+    es = new EventSource(hp("/events"));
+    // some proxies (e.g. free Cloudflare quick tunnels) never deliver event streams: fall back to polling
+    sseWatch = setTimeout(() => { if (!gotFirst) startPolling(); }, 8000);
     es.addEventListener("gateway", (ev) => {
+      gotFirst = true;
       const was = S.live;
       S.live = !!JSON.parse(ev.data).connected;
       if (S.live && !was) scheduleRefresh(); // resync after reconnect
@@ -661,22 +833,36 @@
         scheduleRefresh();
       }
     });
-    es.onerror = () => { S.live = false; if (S.loaded) render(); };
+    es.onerror = () => {
+      S.live = false;
+      if (es && es.readyState === EventSource.CLOSED) startPolling(); // server refused the stream
+      else if (S.loaded) render();
+    };
   }
 
   async function boot() {
-    let session;
-    try { session = await api("GET", "/api/session"); } catch (e) { return showGatewayError(e.message); }
-    if (session.pin_required && !session.authed) return showLogin();
+    try { S.session = await api("GET", "/api/session"); } catch (e) { return showGatewayError(e.message); }
+    const params = new URLSearchParams(location.search);
+    if (params.get("link") === "invalid") { toast("That sign-in link isn't valid anymore", true); history.replaceState(null, "", "/"); }
+    if (S.session.login_required && !S.session.authed) return showLogin();
     try {
-      [S.status, S.prefs] = await Promise.all([api("GET", "/api/status"), api("GET", "/api/prefs")]);
+      S.hubs = (await api("GET", "/api/hubs")).hubs;
     } catch (e) {
       if (e instanceof AuthError) return showLogin();
       return showGatewayError(e.message);
     }
-    if (!S.status.paired) return showPairing();
+    if (!S.hubs.length) return showAddHub();
+    const saved = localStorage.getItem("ihhHub");
+    S.hub = (S.hubs.find((h) => h.id === saved) || S.hubs[0]).id;
+    localStorage.setItem("ihhHub", S.hub);
     try {
-      S.devices = (await api("GET", "/api/devices")).devices;
+      [S.status, S.prefs, S.security] = await Promise.all([api("GET", hp("/status")), api("GET", hp("/prefs")), api("GET", "/api/security")]);
+    } catch (e) {
+      if (e instanceof AuthError) return showLogin();
+      return showGatewayError(e.message);
+    }
+    try {
+      S.devices = (await api("GET", hp("/devices"))).devices;
     } catch (e) {
       if (e instanceof AuthError) return showLogin();
       return showGatewayError(S.status.error || e.message);
@@ -685,6 +871,25 @@
     render();
     connectEvents();
   }
+
+  function switchHub(id) {
+    if (id === S.hub) return closeSheet();
+    localStorage.setItem("ihhHub", id);
+    S.devices = []; S.view = HOME;
+    closeSheet();
+    boot();
+  }
+
+  async function reloadSecurity() {
+    try { S.security = await api("GET", "/api/security"); } catch { /* keep last */ }
+  }
+  // keep the Internet Access sheet live while the tunnel is starting
+  setInterval(async () => {
+    if (S.sheet && S.sheet.type === "settings" && S.sheet.sub === "remote") {
+      await reloadSecurity();
+      renderSheet();
+    }
+  }, 2500);
 
   // ------------------------------------------------------------------ events: page
   let pressTimer = null, longPressAt = 0, pressStart = null;
@@ -745,7 +950,18 @@
     const c = e.target.closest("[data-chip]");
     if (c) openSheet({ type: "list", which: c.dataset.chip }, c);
   });
-  $("#settingsBtn").addEventListener("click", (e) => { if (S.loaded) openSheet({ type: "settings" }, e.currentTarget); });
+  $("#settingsBtn").addEventListener("click", async (e) => {
+    if (!S.loaded) return;
+    const btn = e.currentTarget;
+    await reloadSecurity();
+    openSheet({ type: "settings" }, btn);
+  });
+  $("#homeTitle").addEventListener("click", async (e) => {
+    if (!S.loaded) return;
+    const btn = e.currentTarget;
+    try { S.hubs = (await api("GET", "/api/hubs")).hubs; } catch { /* keep last */ }
+    openSheet({ type: "homes" }, btn);
+  });
   $("#backdrop").addEventListener("click", closeSheet);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && S.sheet) closeSheet(); });
   window.addEventListener("scroll", () => $("#topbar").classList.toggle("scrolled", window.scrollY > 8), { passive: true });
@@ -755,12 +971,18 @@
   // ------------------------------------------------------------------ events: sheet
   const sheetEl = $("#sheet");
   sheetEl.addEventListener("click", async (e) => {
-    const t = e.target.closest("[data-act],[data-icon],[data-set-room],[data-edit-room],[data-open]");
+    const t = e.target.closest("[data-act],[data-icon],[data-set-room],[data-edit-room],[data-open],[data-hub],[data-mode]");
     if (!t) return;
     const sp = S.sheet;
     if (!sp) return;
     const a = sp.key ? findAcc(sp.key) : null;
     if (t.dataset.open) return openSheet({ type: "acc", key: t.dataset.open });
+    if (t.dataset.hub) return switchHub(t.dataset.hub);
+    if (t.dataset.mode) {
+      try { S.security.remote = await api("PUT", "/api/remote", { mode: t.dataset.mode }); } catch (err) { handleError(err, "Couldn't change"); }
+      return renderSheet();
+    }
+    if (t.matches('input[type="checkbox"]')) return; // switches are handled on "change"
     if (t.dataset.icon && a) {
       const icons = { ...S.prefs.icons, [a.key]: t.dataset.icon };
       return savePrefs({ icons });
@@ -769,7 +991,7 @@
     if (t.dataset.editRoom) return openSheet({ type: "settings", sub: "room", room: t.dataset.editRoom });
     switch (t.dataset.act) {
       case "close": return closeSheet();
-      case "back": return openSheet(sp.type === "acc" ? { type: "acc", key: sp.key } : { type: "settings" });
+      case "back": S.newLink = null; return openSheet(sp.type === "acc" ? { type: "acc", key: sp.key } : { type: "settings" });
       case "toggle": if (a) setOn(a, !a.on); return;
       case "pick-room": return openSheet({ ...sp, sub: "room" });
       case "add-room": {
@@ -782,16 +1004,43 @@
         try { await navigator.clipboard.writeText(a.sn); toast("Serial number copied"); } catch { toast(a.sn); }
         return;
       case "all-off": return turnOffMany(accessories().filter((x) => S.view === HOME || x.room === S.view), "Everything");
-      case "repair": closeSheet(); return showPairing(S.status && S.status.host);
-      case "pin": return openSheet({ type: "settings", sub: "pin" });
-      case "save-pin": {
-        const pin = $("#pinInput").value.trim();
+      case "repair": return showAddHub({ title: "Change IP Address", host: currentHub().host, name: currentHub().name });
+      case "remove-hub": return openSheet({ type: "settings", sub: "hub-remove" });
+      case "remove-hub-confirm": {
         try {
-          await api("POST", "/api/pin", { pin });
-          S.status.pin_enabled = !!pin;
-          toast(pin ? "PIN set" : "PIN turned off");
-          openSheet({ type: "settings" });
-        } catch (err) { handleError(err, "Couldn't save PIN"); }
+          await api("DELETE", hp(""));
+          localStorage.removeItem("ihhHub");
+          toast("iHost removed");
+          closeSheet();
+          return boot();
+        } catch (err) { return handleError(err, "Couldn't remove"); }
+      }
+      case "homes": return openSheet({ type: "homes" });
+      case "add-hub": return showAddHub();
+      case "remote": await reloadSecurity(); return openSheet({ type: "settings", sub: "remote" });
+      case "password": return openSheet({ type: "settings", sub: "password" });
+      case "copy-url": return copyText(S.security.remote.url, "Link copied");
+      case "copy-link": return copyText(`${S.security.remote.url || location.origin}/login?key=${S.newLink}`, "Sign-in link copied");
+      case "make-link":
+        try { S.newLink = (await api("POST", "/api/security/link")).key; await reloadSecurity(); renderSheet(); }
+        catch (err) { handleError(err, "Couldn't create link"); }
+        return;
+      case "revoke-link":
+        try { await api("DELETE", "/api/security/link"); S.newLink = null; await reloadSecurity(); renderSheet(); toast("Sign-in link turned off"); }
+        catch (err) { handleError(err, "Couldn't turn off"); }
+        return;
+      case "signout-all":
+        try { await api("POST", "/api/security/signout-all"); toast("Other devices signed out"); } catch (err) { handleError(err, "Couldn't sign out"); }
+        return;
+      case "signout":
+        try { await api("POST", "/api/logout"); } catch { /* ignore */ }
+        closeSheet();
+        return boot();
+      case "save-tunnel": {
+        const body = { public_url: $("#tunUrl").value.trim() };
+        if ($("#tunToken").value.trim()) body.tunnel_token = $("#tunToken").value.trim();
+        try { S.security.remote = await api("PUT", "/api/remote", body); toast("Saved"); renderSheet(); }
+        catch (err) { handleError(err, "Couldn't save"); }
         return;
       }
       case "save-room": {
@@ -817,7 +1066,9 @@
     if (t.dataset.rename === "acc") { const a = findAcc(S.sheet.key); if (a) renameAccessory(a, t.value); return; }
     if (t.dataset.rename === "dev") { const a = findAcc(S.sheet.key); if (a) renameDevice(a.sn, t.value); return; }
     if (t.dataset.renameCh) { const x = findAcc(t.dataset.renameCh); if (x) renameAccessory(x, t.value); return; }
-    if (t.id === "homeName" && t.value.trim()) return savePrefs({ home_name: t.value.trim() });
+    if (t.id === "homeName" && t.value.trim()) return renameHub(t.value.trim());
+    if (t.matches('[data-act="lan-login"]')) return setSecurity({ lan_login: t.checked }, t);
+    if (t.matches('[data-act="remote-toggle"]')) return setRemote(t.checked, t);
   });
   sheetEl.addEventListener("keydown", (e) => {
     const t = e.target;
@@ -825,7 +1076,8 @@
     if (e.key === "Enter") {
       e.preventDefault();
       if (t.id === "newRoom") return $('[data-act="add-room"]').click();
-      if (t.id === "pinInput") return $('[data-act="save-pin"]').click();
+      if (t.id === "tunToken" || t.id === "tunUrl") return $('[data-act="save-tunnel"]').click();
+      if (t.form) return t.form.requestSubmit();
       if (t.id === "roomName") return $('[data-act="save-room"]').click();
       t.blur();
     } else if (e.key === "Escape") {
@@ -834,6 +1086,40 @@
       e.stopPropagation();
     }
   });
+  sheetEl.addEventListener("submit", async (e) => {
+    if (e.target.dataset.form !== "password") return;
+    e.preventDefault();
+    const cur = $("#pwCurrent"), n1 = $("#pwNew").value, n2 = $("#pwNew2").value;
+    if (n1.length < 8) return toast("Use at least 8 characters", true);
+    if (n1 !== n2) return toast("The new passwords don't match", true);
+    try {
+      await api("POST", "/api/security/password", { current: cur ? cur.value : "", new: n1 });
+      await reloadSecurity();
+      toast("Password saved");
+      openSheet({ type: "settings" });
+    } catch (err) { handleError(err, "Couldn't save"); }
+  });
+
+  async function copyText(text, msg) {
+    try { await navigator.clipboard.writeText(text); toast(msg); }
+    catch { window.prompt("Copy this:", text); }
+  }
+  async function renameHub(name) {
+    try {
+      const h = await api("PATCH", hp(""), { name });
+      const cur = currentHub(); cur.name = h.name;
+      toast("Name saved"); render();
+    } catch (e) { handleError(e, "Couldn't rename"); }
+  }
+  async function setSecurity(patch, el) {
+    try { await api("PUT", "/api/security/settings", patch); await reloadSecurity(); renderSheet(); }
+    catch (e) { if (el) el.checked = !el.checked; handleError(e, "Couldn't change"); }
+  }
+  async function setRemote(on, el) {
+    try { S.security.remote = await api("PUT", "/api/remote", { enabled: on }); renderSheet(); toast(on ? "Starting internet access…" : "Internet access off"); }
+    catch (e) { if (el) el.checked = !on; handleError(e, "Couldn't change"); }
+  }
+
   // after an input loses focus, catch up on any live updates we skipped while typing
   sheetEl.addEventListener("focusout", () => setTimeout(() => { if (S.sheet) renderSheet(); }, 50));
 

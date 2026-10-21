@@ -154,7 +154,8 @@ try:
     time.sleep(0.5)
     js("document.querySelector('[data-act=\"fav\"]').click()")
     time.sleep(0.8)
-    prefs = json.load(urllib.request.urlopen(APP + "/api/prefs"))
+    hub_id = json.load(urllib.request.urlopen(APP + "/api/hubs"))["hubs"][0]["id"]
+    prefs = json.load(urllib.request.urlopen(APP + f"/api/hubs/{hub_id}/prefs"))
     check("favorite + icon saved", "SN-2GANG:2" in prefs["favorites"] and prefs["icons"].get("SN-2GANG:2") == "fan")
     shot("4-phone-sheet-after-edits")
     js("document.querySelector('[data-act=\"close\"]').click()")

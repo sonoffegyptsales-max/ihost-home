@@ -103,6 +103,9 @@ svg { display: block; }
 .topbar-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; max-width: 1180px; margin: 0 auto; }
 .title { font-size: 34px; font-weight: 700; letter-spacing: .37px; margin: 0; line-height: 1.15; cursor: default; }
 .top-actions { display: flex; align-items: center; gap: 12px; }
+.title-btn { font: inherit; letter-spacing: inherit; display: inline-flex; align-items: center; gap: 8px; max-width: 100%; text-align: left; }
+.title-btn:active { opacity: .7; }
+.title-chev { width: 16px; height: 11px; flex: none; stroke: var(--ink-2); stroke-width: 2.2; fill: none; stroke-linecap: round; stroke-linejoin: round; margin-top: 4px; }
 .icon-btn {
   width: 36px; height: 36px; border-radius: 50%;
   display: grid; place-items: center;
@@ -111,6 +114,7 @@ svg { display: block; }
 .icon-btn svg { width: 20px; height: 20px; fill: var(--ink); }
 .icon-btn:active { transform: scale(.92); }
 .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); transition: background .3s; }
+.live-dot.poll { background: var(--orange); }
 .live-dot.on { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 25%, transparent); }
 
 .rooms-nav {
@@ -196,6 +200,8 @@ svg { display: block; }
   max-width: 420px; margin: 8vh auto 0; padding: 28px 24px; border-radius: 22px;
   background: var(--group); text-align: center;
 }
+.center-card.wide { max-width: 520px; }
+.center-card .group { text-align: left; }
 .center-card h2 { margin: 12px 0 6px; font-size: 22px; }
 .center-card p { color: var(--ink-2); margin: 0 0 18px; font-size: 15px; }
 .center-card .big-ico { width: 64px; height: 64px; margin: 0 auto; border-radius: 16px; overflow: hidden; }
@@ -302,6 +308,7 @@ svg { display: block; }
   position: relative; width: 100%; text-align: left; font-size: 17px;
 }
 .row + .row::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; border-top: .5px solid var(--sep); }
+.row .lbl.mono, .lbl.mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; }
 .row .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .val { color: var(--ink-2); text-align: right; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
 .row .val.mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 13px; }

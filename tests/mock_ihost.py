@@ -86,7 +86,9 @@ class H(BaseHTTPRequestHandler):
                 return self.send({"error": 401, "data": {}, "message": "link button not pressed"})
             return self.send({"error": 0, "data": {"token": TOKEN}, "message": "success"})
         if u.path == "/open-api/v2/rest/bridge":
-            return self.send({"error": 0, "data": {"ip": "127.0.0.1", "mac": "00:00", "fw_version": "mock"},
+            port = self.server.server_address[1]
+            return self.send({"error": 0, "data": {"ip": "127.0.0.1", "mac": "00:00", "fw_version": "mock",
+                                                   "deviceid": f"mock-{port}", "name": f"Mock iHost {port}"},
                               "message": "success"})
         if u.path == "/open-api/v2/rest/devices":
             if self.authed():

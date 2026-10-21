@@ -1,8 +1,12 @@
 config.json
 prefs.json
+bin/
 cli/config.json
 cli/scenes.json
 *.tmp
+*.part
 __pycache__/
 *.pyc
 .venv*/
+shots/
+testdata/
