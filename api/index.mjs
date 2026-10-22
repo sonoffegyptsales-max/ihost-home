@@ -11,6 +11,13 @@
 //   IHOST_NAME     optional home name
 //   IHOSTS         optional JSON: [{"name":"Villa","url":"https://...cube.ewelink.cc","token":"..."}, ...]
 //   SESSION_SECRET optional; change it to sign every device out
+//
+// Door locks (optional, Tuya cloud - locks have no local control):
+//   TUYA_REGION        eu | weu | us | ueaz | cn | in | sg   (data center of the Tuya cloud project)
+//   TUYA_ACCESS_ID     Access ID / Client ID of the Tuya cloud project
+//   TUYA_ACCESS_SECRET Access Secret / Client Secret
+//   TUYA_LOCKS         comma-separated Tuya device IDs of the locks to show
+//   UNLOCK_PASSWORD    6+ characters, different from APP_PASSWORD - asked for every remote unlock
 import crypto from "node:crypto";
 
 const API = "/open-api/v2/rest";
@@ -194,6 +201,112 @@ function events(hub) {
   return new Response(stream, { headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff" } });
 }
 
+// ------------------------------------------------------------------ Tuya cloud: door locks
+const TUYA_HOSTS = { eu: "openapi.tuyaeu.com", weu: "openapi-weaz.tuyaeu.com", us: "openapi.tuyaus.com", ueaz: "openapi-ueaz.tuyaus.com",
+                     cn: "openapi.tuyacn.com", in: "openapi.tuyain.com", sg: "openapi-sg.iotbing.com" };
+function tuyaCfg() {
+  const id = (process.env.TUYA_ACCESS_ID || "").trim(), secret = (process.env.TUYA_ACCESS_SECRET || "").trim();
+  const region = (process.env.TUYA_REGION || "eu").trim().toLowerCase();
+  const base = (process.env.TUYA_ENDPOINT || `https://${TUYA_HOSTS[region] || TUYA_HOSTS.eu}`).replace(/\/+$/, "");
+  const locks = (process.env.TUYA_LOCKS || "").split(",").map((s) => s.trim()).filter(Boolean);
+  return { id, secret, base, locks, ok: !!(id && secret && locks.length) };
+}
+const sha256hex = (s) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
+// Tuya "new" signature: HMAC-SHA256(client_id + access_token + t + nonce + METHOD\nSHA256(body)\n\nURL), uppercase hex
+function tuyaSign(cfg, method, pathWithQuery, body, token, t, nonce = "") {
+  const stringToSign = [method, sha256hex(body || ""), "", pathWithQuery].join("\n");
+  return crypto.createHmac("sha256", cfg.secret).update(cfg.id + (token || "") + t + nonce + stringToSign, "utf8").digest("hex").toUpperCase();
+}
+function withQuery(path, q) {
+  const keys = Object.keys(q || {}).sort();
+  return keys.length ? `${path}?${keys.map((k) => `${k}=${q[k]}`).join("&")}` : path;
+}
+let tuyaToken = { value: null, exp: 0, key: "" };
+async function tuyaRaw(cfg, method, pathWithQuery, payload, token) {
+  const body = payload === undefined ? "" : JSON.stringify(payload);
+  const t = String(Date.now());
+  const headers = { client_id: cfg.id, t, sign_method: "HMAC-SHA256", sign: tuyaSign(cfg, method, pathWithQuery, body, token, t) };
+  if (token) headers.access_token = token;
+  if (body) headers["Content-Type"] = "application/json";
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 10000);
+  try {
+    const res = await fetch(cfg.base + pathWithQuery, { method, headers, body: body || undefined, signal: ctl.signal });
+    return await res.json();
+  } catch (e) {
+    throw new GatewayError(`Can't reach the Tuya cloud (${e.name === "AbortError" ? "timeout" : e.message})`);
+  } finally { clearTimeout(timer); }
+}
+async function tuyaTokenFor(cfg, force) {
+  const key = cfg.id + cfg.base;
+  if (!force && tuyaToken.value && tuyaToken.key === key && Date.now() < tuyaToken.exp - 60000) return tuyaToken.value;
+  const r = await tuyaRaw(cfg, "GET", "/v1.0/token?grant_type=1");
+  if (!r.success) throw new GatewayError(`Tuya cloud login failed: ${r.msg || "unknown"} (code ${r.code}) - check TUYA_ACCESS_ID / SECRET / REGION`);
+  tuyaToken = { value: r.result.access_token, exp: Date.now() + (r.result.expire_time || 3600) * 1000, key };
+  return tuyaToken.value;
+}
+async function tuya(method, path, payload, query) {
+  const cfg = tuyaCfg();
+  const pq = withQuery(path, query);
+  let r = await tuyaRaw(cfg, method, pq, payload, await tuyaTokenFor(cfg));
+  if (!r.success && [1010, 1011, 1012].includes(Number(r.code))) r = await tuyaRaw(cfg, method, pq, payload, await tuyaTokenFor(cfg, true));
+  if (!r.success) {
+    const err = new GatewayError(`Tuya: ${r.msg || "request failed"} (code ${r.code})`);
+    err.tuyaCode = r.code;
+    throw err;
+  }
+  return r.result;
+}
+const settle = async (p) => { try { return { ok: true, value: await p }; } catch (e) { return { ok: false, error: e.message }; } };
+function lockSummary(dev) {
+  const status = Object.fromEntries((dev.status || []).map((s) => [s.code, s.value]));
+  return { id: dev.id, name: dev.name, online: !!dev.online, category: dev.category, product: dev.product_name, model: dev.model || null,
+           icon: dev.icon ? `https://images.tuyaeu.com/${dev.icon}` : null, updated: (dev.update_time || 0) * 1000,
+           active_since: (dev.active_time || 0) * 1000, ip: dev.ip || null, time_zone: dev.time_zone || null, status };
+}
+const unlockFails = new Map(); // ip -> [timestamps]; plus a global bucket "*"
+async function lockList() {
+  const cfg = tuyaCfg();
+  const out = await Promise.all(cfg.locks.map(async (id) => {
+    const r = await settle(tuya("GET", `/v1.0/devices/${encodeURIComponent(id)}`));
+    return r.ok ? lockSummary(r.value) : { id, name: "Door Lock", online: false, error: r.error, status: {} };
+  }));
+  return out;
+}
+async function lockDetail(id) {
+  const now = Date.now();
+  const [dev, logs, alarms, remote] = await Promise.all([
+    settle(tuya("GET", `/v1.0/devices/${encodeURIComponent(id)}`)),
+    settle(tuya("GET", `/v1.0/devices/${encodeURIComponent(id)}/door-lock/open-logs`, undefined,
+                { end_time: now, page_no: 1, page_size: 20, start_time: now - 30 * 86400000 })),
+    settle(tuya("GET", `/v1.0/devices/${encodeURIComponent(id)}/door-lock/alarm-logs`, undefined, { page_no: 1, page_size: 10 })),
+    settle(tuya("GET", `/v1.0/devices/${encodeURIComponent(id)}/door-lock/remote-unlocks`)),
+  ]);
+  if (!dev.ok) throw new GatewayError(dev.error);
+  const pick = (r) => (r.ok ? (Array.isArray(r.value) ? r.value : r.value && (r.value.logs || r.value.list || r.value.records)) || [] : null);
+  return { ...lockSummary(dev.value), history: pick(logs), history_error: logs.ok ? null : logs.error,
+           alarms: pick(alarms), alarms_error: alarms.ok ? null : alarms.error,
+           remote_unlock: remote.ok ? remote.value : null, remote_unlock_error: remote.ok ? null : remote.error,
+           unlock_password_set: unlockPassword().length >= 6 };
+}
+const unlockPassword = () => (process.env.UNLOCK_PASSWORD || "").trim();
+async function unlock(id) {
+  const ticket = await tuya("POST", `/v1.0/devices/${encodeURIComponent(id)}/door-lock/password-ticket`);
+  try {
+    await tuya("POST", `/v1.0/devices/${encodeURIComponent(id)}/door-lock/password-free/open-door`, { ticket_id: ticket.ticket_id });
+    return "open-door";
+  } catch (e) {
+    // some lock models only accept the newer "smart-lock" API
+    const t2 = await tuya("POST", `/v1.0/smart-lock/devices/${encodeURIComponent(id)}/password-ticket`);
+    try {
+      await tuya("POST", `/v1.0/smart-lock/devices/${encodeURIComponent(id)}/password-free/door-operate`, { ticket_id: t2.ticket_id, open: true });
+      return "door-operate";
+    } catch (e2) {
+      throw new GatewayError(`${e.message}; ${e2.message}`);
+    }
+  }
+}
+
 // ------------------------------------------------------------------ router
 async function handle(req) {
   const url = new URL(req.url);
@@ -208,7 +321,7 @@ async function handle(req) {
     const configured = pw.length >= 10 && hubs().length > 0;
     if (path === "/api/session") {
       return json({ authed: configured && validSession(req), login_required: true, remote: true, cloud: true,
-                    has_password: !!pw, remote_enabled: true,
+                    has_password: !!pw, remote_enabled: true, locks: tuyaCfg().ok,
                     setup: configured ? null : (pw.length < 10 ? "Set APP_PASSWORD (at least 10 characters) in the Vercel project settings, then redeploy."
                                                               : "Set IHOST_URL and IHOST_TOKEN in the Vercel project settings, then redeploy.") });
     }
@@ -234,6 +347,44 @@ async function handle(req) {
     if (path === "/api/security" && method === "GET") {
       return json({ cloud: true, has_password: true, weak_password: false, lan_login: false, has_link: false, this_request_remote: true,
                     remote: { enabled: true, mode: "cloud", state: "running", url: url.origin, error: "" } });
+    }
+    if (path === "/api/locks" && method === "GET") {
+      if (!tuyaCfg().ok) return json({ configured: false, locks: [] });
+      return json({ configured: true, locks: await lockList() });
+    }
+    if (parts[1] === "locks" && parts[2]) {
+      const id = parts[2];
+      if (!tuyaCfg().locks.includes(id)) return json({ error: "unknown lock" }, 404);
+      if (parts.length === 3 && method === "GET") return json(await lockDetail(id));
+      if (parts[3] === "unlock" && method === "POST") {
+        const upw = unlockPassword();
+        if (upw.length < 6 || upw === pw) {
+          return json({ error: "Remote unlock is off: set UNLOCK_PASSWORD (6+ characters, different from the app password) in Vercel, then redeploy." }, 403);
+        }
+        const ip = clientIp(req);
+        const win = (k, ms) => (unlockFails.get(k) || []).filter((t) => Date.now() - t < ms);
+        if (win(ip, 15 * 60000).length >= 5 || win("*", 60 * 60000).length >= 10) {
+          console.warn(`[unlock] BLOCKED lock=${id} ip=${ip} (too many wrong passwords)`);
+          return json({ error: "Too many wrong unlock passwords - try again later" }, 429);
+        }
+        const given = crypto.createHash("sha256").update(String(raw.password || "")).digest();
+        const want = crypto.createHash("sha256").update(upw).digest();
+        if (!crypto.timingSafeEqual(given, want)) {
+          unlockFails.set(ip, [...win(ip, 15 * 60000), Date.now()]);
+          unlockFails.set("*", [...win("*", 60 * 60000), Date.now()]);
+          console.warn(`[unlock] WRONG PASSWORD lock=${id} ip=${ip}`);
+          await new Promise((r) => setTimeout(r, 800));
+          return json({ error: "Wrong unlock password" }, 403);
+        }
+        try {
+          const via = await unlock(id);
+          console.warn(`[unlock] OK lock=${id} ip=${ip} via=${via}`);
+          return json({ ok: true, via });
+        } catch (e) {
+          console.warn(`[unlock] FAILED lock=${id} ip=${ip}: ${e.message}`);
+          return json({ error: `The lock refused remote unlock: ${e.message}` }, 502);
+        }
+      }
     }
     if (parts[1] === "hubs" && parts[2]) {
       const hub = hubs().find((h) => h.id === parts[2]);
@@ -280,3 +431,4 @@ async function handle(req) {
 }
 
 export const GET = handle, POST = handle, PUT = handle, PATCH = handle, DELETE = handle;
+export const _test = { tuyaSign, withQuery };

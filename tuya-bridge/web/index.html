@@ -75,7 +75,25 @@
     <label>Protocol version
       <select id="eVer"><option>3.1</option><option>3.2</option><option>3.3</option><option>3.4</option><option>3.5</option></select></label>
     <label>Switch DPS numbers (multi-gang, optional) <input id="eDps" placeholder="1,2,3"></label>
+    <label id="eHubRow" hidden>IR transmitter used by this remote <select id="eHub"></select></label>
     <menu><button value="cancel" formnovalidate>Cancel</button><button id="eSave" value="save">Save</button></menu>
+  </form>
+</dialog>
+<dialog id="codesDlg">
+  <form method="dialog">
+    <h3 id="cTitle">IR codes</h3>
+    <p class="muted small">Teach the bridge your AC remote, one state at a time. Set the remote to the state first
+      (e.g. Cool, 24°), then press <b>Learn</b> and press any button on the remote while pointing it at the IR transmitter
+      — AC remotes send the whole state with every press. Commands without a learned code use the Tuya cloud (if set up).</p>
+    <div class="row">
+      <select id="cMode" aria-label="Mode"><option value="off">Off</option><option value="cool" selected>Cool</option>
+        <option value="heat">Heat</option><option value="auto">Auto</option><option value="fan">Fan only</option><option value="dry">Dry</option></select>
+      <select id="cTemp" aria-label="Temperature"></select>
+      <button type="button" id="cLearn">Learn</button>
+    </div>
+    <p id="cMsg" class="hint"></p>
+    <div id="cList"></div>
+    <menu><button value="close">Done</button></menu>
   </form>
 </dialog>
 <script src="app.js"></script>

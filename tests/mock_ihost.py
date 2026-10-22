@@ -6,6 +6,7 @@ Pairing: the first access_token call returns 401 "link button not pressed", the 
 """
 import copy
 import json
+import os
 import queue
 import sys
 import threading
@@ -40,6 +41,14 @@ DEVICES = [
      "capabilities": [{"capability": "power", "permission": "1100"}],
      "state": {"power": {"powerState": "off"}}, "tags": {}},
 ]
+if os.environ.get("MOCK_AC"):
+    DEVICES.append({"serial_number": "SN-AC", "name": "Living AC", "display_category": "airConditioner", "online": True,
+                    "capabilities": [{"capability": "power", "permission": "1100"},
+                                     {"capability": "mode", "name": "airConditionerMode", "permission": "1100"},
+                                     {"capability": "mode", "name": "fanLevel", "permission": "1100"},
+                                     {"capability": "thermostat-target-setpoint", "name": "manual-mode", "permission": "1100"}],
+                    "state": {"power": {"powerState": "off"}, "mode": {"airConditionerMode": {"modeValue": "cool"}, "fanLevel": {"modeValue": "auto"}},
+                              "thermostat-target-setpoint": {"manual-mode": {"targetSetpoint": 24}}}, "tags": {"room": "living"}})
 LOCK = threading.Lock()
 PAIR = {"pressed": False}
 LISTENERS = []

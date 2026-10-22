@@ -51,3 +51,24 @@ adds 3 temporary devices, drives them both ways (iHost → device, button press 
 restart, then removes them.
 
 Notes: the iHost firmware requires `header.version: "2"` on `/thirdparty/event` (the docs still say "1").
+
+## IR air conditioners (Tuya IR blaster / "Smart IR")
+
+- The **IR transmitter** itself is not added to the iHost (it has nothing to switch). The bridge only checks that it's
+  online. It answers status checks with an empty reply, which counts as online.
+- The **AC** (`infrared_ac`) is added as an iHost **airConditioner**: power, mode (cool/heat/auto/fan/dry), 16–30 °C, and
+  fan (auto/low/medium/high). It shows up in the iHost console, iHost Home (LAN + Vercel) and CUBE scenes.
+- Each command first uses a **learned IR code** (100% local) for that exact state: `off`, `cool_24`, `heat_22`, `fan`, `dry`…
+  Learn codes on the bridge page → **IR codes**: set the real remote to the state, press **Learn**, then press a button on
+  the remote while pointing it at the transmitter.
+- With no learned code, the bridge uses Tuya's **cloud AC command** (`/v2.0/infrareds/{ir}/air-conditioners/{ac}/scenes/command`).
+  That needs the Tuya cloud keys and an active IoT Core trial. Learn your common states to stay fully local.
+- IR is one-way: the iHost shows the last command sent, not what the AC really does.
+
+## Door locks
+
+Tuya Wi-Fi locks have no local control. They're listed here but not added to the iHost. The **iHost Home cloud app
+(Vercel)** shows their status, battery, unlock history and alarms, and can unlock remotely with a separate unlock
+password (see the main README).
+
+`tests/e2e_ac.py <ihost-url> <token>`: 20 checks for the AC path against a real iHost, using a simulated IR transmitter and cloud.

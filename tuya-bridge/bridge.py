@@ -185,10 +185,32 @@ def _values(v):
 
 LIGHT_CATEGORIES = {"dj", "dd", "dc", "fwd", "xdd", "fsd", "tgq", "tgkg", "gyd", "sxd", "tyndj"}
 PLUG_CATEGORIES = {"cz", "pc", "wkcz"}
+IR_HUB_CATEGORIES = {"wnykq", "hwktwkq", "wsdykq"}            # universal IR / IR+RF remotes
+LOCK_CATEGORIES = {"ms", "jtmspro", "jtmsbh", "videolock", "gyms", "mk", "photolock", "bxx", "wf_ms"}
+AC_DEFAULT = {"power": "off", "mode": "cool", "temp": 24, "fan": "auto"}
+AC_MODES = ["cool", "heat", "auto", "fan", "dry"]          # index = Tuya cloud "mode"
+AC_FANS = ["auto", "low", "medium", "high"]                 # index = Tuya cloud "wind"
+
+
+def special_kind(dev):
+    cat = (dev.get("category") or "").lower()
+    if cat in IR_HUB_CATEGORIES:
+        return "ir_hub"
+    if cat == "infrared_ac":
+        return "ac"
+    if cat.startswith("infrared_"):
+        return "ir_other"
+    if cat in LOCK_CATEGORIES or "lock" in cat:
+        return "lock"
+    return None
 
 
 def describe(dev):
     """Work out how a Tuya device maps to iHost: kind, display category, channels and DPS numbers."""
+    special = special_kind(dev)
+    if special:
+        return {"display": "airConditioner" if special == "ac" else None, "single": None, "channels": [],
+                "bright": None, "special": special}
     mapping = dev.get("mapping") or {}
     codes = {str(v.get("code")): str(k) for k, v in mapping.items() if isinstance(v, dict) and v.get("code")}
     cat = (dev.get("category") or "").lower()
@@ -224,11 +246,48 @@ def describe(dev):
             single = str(manual[0]) if len(manual) == 1 else None
         else:
             single = "1"
-    return {"display": display, "single": single, "channels": channels, "bright": bright if display == "light" else None}
+    return {"display": display, "single": single, "channels": channels, "bright": bright if display == "light" else None,
+            "special": None}
+
+
+def ac_state(dev):
+    return dict(AC_DEFAULT, **(dev.get("ac") or {}))
+
+
+def ac_ihost_state(s):
+    return {"power": {"powerState": s["power"]},
+            "mode": {"airConditionerMode": {"modeValue": s["mode"]}, "fanLevel": {"modeValue": s["fan"]}},
+            "thermostat-target-setpoint": {"manual-mode": {"targetSetpoint": s["temp"]}}}
+
+
+def ac_endpoint(dev):
+    return {
+        "third_serial_number": "tuya_" + dev["id"],
+        "name": dev.get("name") or "Air Conditioner",
+        "display_category": "airConditioner",
+        "capabilities": [
+            {"capability": "power", "permission": "1100"},
+            {"capability": "mode", "name": "airConditionerMode", "permission": "1100",
+             "settings": {"supportedValues": {"type": "enum", "permission": "01", "values": AC_MODES}}},
+            {"capability": "mode", "name": "fanLevel", "permission": "1100",
+             "settings": {"supportedValues": {"type": "enum", "permission": "01", "values": AC_FANS}}},
+            {"capability": "thermostat-target-setpoint", "name": "manual-mode", "permission": "1100",
+             "settings": {"temperatureUnit": {"type": "enum", "permission": "01", "value": "c", "values": ["c"]},
+                          "temperatureRange": {"type": "numeric", "permission": "01", "min": 16, "max": 30, "step": 1}}},
+        ],
+        "state": ac_ihost_state(ac_state(dev)),
+        "tags": {"source": "tuya-bridge", "tuya_category": "infrared_ac"},
+        "manufacturer": "Tuya",
+        "model": "IR air conditioner",
+        "firmware_version": "",
+        "service_address": service_address(),
+    }
 
 
 def endpoint_for(dev):
     d = describe(dev)
+    if d["special"] == "ac":
+        return ac_endpoint(dev)
     caps, state = [{"capability": "power", "permission": "1100"}], {}
     st = dev.get("last_dps") or {}
     if d["channels"]:
@@ -363,6 +422,153 @@ def tuya_ok(res):
     return isinstance(res, dict) and not res.get("Error") and not res.get("Err")
 
 
+def reachable(res):
+    """IR hubs have no status of their own: they answer status() with an empty payload (None in tinytuya).
+    Only an explicit error (e.g. 905 Device Unreachable) means the device is really gone."""
+    return res is None or (isinstance(res, dict) and not res.get("Error") and not res.get("Err"))
+
+
+# ------------------------------------------------------------------ IR transmitter (Tuya universal remote)
+def _fake_store():
+    return os.path.join(DATA, "fake_tuya.json")
+
+
+class FakeIR:
+    """Test double: sent codes are appended to fake_tuya.json[hub]['_sent']; a test 'presses a remote
+    button' by writing fake_tuya.json[hub]['_learn_next']."""
+
+    def __init__(self, hub):
+        self.id = hub["id"]
+
+    def _rw(self, fn):
+        with lock:
+            allst = _read(_fake_store(), {})
+            st = allst.setdefault(self.id, {})
+            out = fn(st)
+            with open(_fake_store(), "w", encoding="utf-8") as f:
+                json.dump(allst, f)
+            return out
+
+    def send_button(self, code):
+        def f(st):
+            if st.get("_offline"):
+                raise IHostError("IR transmitter unreachable")
+            st.setdefault("_sent", []).append(code)
+        self._rw(f)
+
+    def receive_button(self, timeout=15):
+        end = time.time() + timeout
+        while time.time() < end:
+            code = self._rw(lambda st: st.pop("_learn_next", None))
+            if code:
+                return code
+            time.sleep(0.3)
+        return None
+
+
+class IRLink:
+    """Sends / learns raw IR codes through a Tuya IR hub. Shares the hub's socket lock with its status Link,
+    because many Tuya devices only accept one local connection at a time."""
+
+    def __init__(self, hub):
+        self.hub = hub
+        self.dev = None
+
+    def _device(self):
+        if FAKE:
+            return FakeIR(self.hub)
+        if self.dev is None:
+            from tinytuya.Contrib.IRRemoteControlDevice import IRRemoteControlDevice
+            ct = int(self.hub.get("ir_control_type") or 0)
+            d = IRRemoteControlDevice(self.hub["id"], address=self.hub.get("ip"), local_key=self.hub.get("key") or "",
+                                      version=float(self.hub.get("version") or 3.3), control_type=ct or None,
+                                      connection_timeout=3, connection_retry_limit=1, connection_retry_delay=0)
+            if not ct and d.control_type:
+                self.hub["ir_control_type"] = d.control_type
+                save()
+            if not d.control_type:
+                raise IHostError("Couldn't talk to the IR transmitter (no answer on the network)")
+            self.dev = d
+        return self.dev
+
+    def send(self, code):
+        with link_for(self.hub).lock:
+            self._device().send_button(code)
+
+    def learn(self, timeout=15):
+        with link_for(self.hub).lock:
+            res = self._device().receive_button(timeout)
+        if isinstance(res, str) and len(res) > 8:
+            return res
+        return None
+
+
+IR_LINKS = {}
+DETECTING = set()
+
+
+def ir_link(hub):
+    with lock:
+        lk = IR_LINKS.get(hub["id"])
+        if lk is None or lk.hub is not hub:
+            lk = IR_LINKS[hub["id"]] = IRLink(hub)
+        return lk
+
+
+def hub_for(dev):
+    """The IR transmitter an IR remote (e.g. the AC) belongs to."""
+    hubs = [d for d in CFG["devices"].values() if special_kind(d) == "ir_hub"]
+    for key in ("ir_hub", "gateway_id", "parent"):
+        hid = dev.get(key)
+        if hid and hid in CFG["devices"]:
+            return CFG["devices"][hid]
+    return hubs[0] if len(hubs) == 1 else None
+
+
+# ------------------------------------------------------------------ Tuya cloud (optional fallback for IR AC)
+class CloudError(IHostError):
+    pass
+
+
+_cloud = {"obj": None, "sig": None}
+
+
+def cloud_ready():
+    t = CFG["tuya"]
+    return bool(t.get("api_key") and t.get("api_secret"))
+
+
+def cloud_call(url, post=None, action=None, _retry=True):
+    t = CFG["tuya"]
+    if not cloud_ready():
+        raise CloudError("Tuya cloud keys not set (step 2 on this page)")
+    if FAKE:
+        def f(allst):
+            allst.setdefault("_cloud", []).append({"url": url, "post": post})
+        with lock:
+            allst = _read(_fake_store(), {})
+            f(allst)
+            with open(_fake_store(), "w", encoding="utf-8") as fh:
+                json.dump(allst, fh)
+        return True
+    sig = (t["region"], t["api_key"], t["api_secret"])
+    if _cloud["obj"] is None or _cloud["sig"] != sig:
+        import tinytuya
+        c = tinytuya.Cloud(apiRegion=t["region"], apiKey=t["api_key"], apiSecret=t["api_secret"])
+        if getattr(c, "error", None):
+            raise CloudError(f"Tuya cloud: {c.error}")
+        _cloud.update(obj=c, sig=sig)
+    res = _cloud["obj"].cloudrequest(url, action=action, post=post)
+    if not isinstance(res, dict):
+        raise CloudError("Tuya cloud: no answer")
+    if not res.get("success"):
+        if _retry and str(res.get("code")) in ("1010", "1011", "1012"):  # token expired / invalid
+            _cloud["obj"] = None
+            return cloud_call(url, post, action, _retry=False)
+        raise CloudError(f"Tuya cloud: {res.get('msg') or res.get('Error') or res} (code {res.get('code')})")
+    return res.get("result")
+
+
 # ------------------------------------------------------------------ syncing with the iHost
 def ihost_devices():
     res = ihost("GET", "/devices")
@@ -373,11 +579,26 @@ def ihost_devices():
 
 def add_to_ihost(dev_id):
     dev = CFG["devices"][dev_id]
-    if not dev.get("ip") and not FAKE:
-        raise IHostError("This device has no IP yet - run Scan first (or type its IP).")
-    st = link_for(dev).status()
-    if tuya_ok(st):
-        dev["last_dps"] = st.get("dps") or {}
+    special = special_kind(dev)
+    if special == "lock":
+        raise IHostError("Door locks can't be controlled locally - they are shown in the iHost Home app (cloud).")
+    if special == "ir_hub":
+        raise IHostError("The IR transmitter itself has nothing to switch - add the remotes that use it (e.g. the AC).")
+    if special == "ir_other":
+        raise IHostError("Only IR air conditioners are supported so far.")
+    if special == "ac":
+        hub = hub_for(dev)
+        if not hub:
+            raise IHostError("Pick which IR transmitter this AC uses (Edit), then try again.")
+        st = link_for(hub).status() if (hub.get("ip") or FAKE) else {"Error": "IR transmitter IP unknown - run Scan"}
+        ok = reachable(st)
+    else:
+        if not dev.get("ip") and not FAKE:
+            raise IHostError("This device has no IP yet - run Scan first (or type its IP).")
+        st = link_for(dev).status()
+        ok = tuya_ok(st)
+        if ok:
+            dev["last_dps"] = st.get("dps") or {}
     res = ihost_event("DiscoveryRequest", {"endpoints": [endpoint_for(dev)]})
     eps = (res.get("payload") or {}).get("endpoints") or []
     sn = next((e.get("serial_number") for e in eps if e.get("third_serial_number") == "tuya_" + dev_id), None)
@@ -385,10 +606,12 @@ def add_to_ihost(dev_id):
         sn = next((d["serial_number"] for d in ihost_devices() if d.get("third_serial_number") == "tuya_" + dev_id), None)
     if not sn:
         raise IHostError("The iHost accepted the device but didn't return its serial number")
-    dev.update(ihost_sn=sn, enabled=True, online=tuya_ok(st))
+    dev.update(ihost_sn=sn, enabled=True, online=ok)
     save()
-    if not tuya_ok(st):
+    if not ok:
         report_online(dev, False)
+    else:  # the iHost sometimes stores the discovery state a moment late; report it explicitly
+        report_state(dev, endpoint_for(dev)["state"])
     log("added to iHost:", dev.get("name"), sn)
     return sn
 
@@ -450,7 +673,67 @@ def resync_all():
 
 
 # ------------------------------------------------------------------ control: iHost -> Tuya
+def ac_code_key(s):
+    if s["power"] == "off":
+        return "off"
+    return s["mode"] if s["mode"] in ("fan", "dry") else f"{s['mode']}_{s['temp']}"
+
+
+def send_ac(dev, s):
+    """Learned code first (100% local); otherwise Tuya's cloud AC command (needs the cloud trial active)."""
+    hub = hub_for(dev)
+    if not hub:
+        raise IHostError("No IR transmitter linked to this AC")
+    code = (dev.get("codes") or {}).get(ac_code_key(s))
+    if code:
+        ir_link(hub).send(code)
+        return "local"
+    if cloud_ready():
+        body = {"power": 1 if s["power"] == "on" else 0, "mode": AC_MODES.index(s["mode"]), "temp": int(s["temp"]),
+                "wind": AC_FANS.index(s["fan"])}
+        cloud_call(f"/v2.0/infrareds/{hub['id']}/air-conditioners/{dev['id']}/scenes/command", post=body, action="POST")
+        return "cloud"
+    raise IHostError(f"No learned IR code for '{ac_code_key(s)}' and no Tuya cloud keys to fall back on")
+
+
+def apply_ac(dev, state):
+    cur = ac_state(dev)
+    new = dict(cur)
+    ps = (state.get("power") or {}).get("powerState")
+    if ps:
+        new["power"] = ("off" if cur["power"] == "on" else "on") if ps == "toggle" else ps
+    for name, v in (state.get("mode") or {}).items():
+        val = (v or {}).get("modeValue")
+        if name == "airConditionerMode" and val in AC_MODES:
+            new["mode"] = val
+        elif name == "fanLevel" and val in AC_FANS:
+            new["fan"] = val
+    for v in (state.get("thermostat-target-setpoint") or {}).values():
+        try:
+            new["temp"] = max(16, min(30, int(round(float((v or {}).get("targetSetpoint"))))))
+        except (TypeError, ValueError):
+            pass
+    if new == cur and not ps:
+        return True, ac_ihost_state(new)
+    try:
+        if new["power"] == "on" or cur["power"] == "on":  # settings changed while off are just remembered
+            dev["ac_via"] = send_ac(dev, new)
+        dev["last_error"] = None
+    except Exception as e:
+        dev["last_error"] = str(e)
+        log("AC command failed:", dev.get("name"), e)
+        return False, "ENDPOINT_UNREACHABLE"
+    dev["ac"] = new
+    save()
+    return True, ac_ihost_state(new)
+
+
 def apply_directive(dev, state):
+    special = special_kind(dev)
+    if special == "ac":
+        return apply_ac(dev, state)
+    if special:
+        return False, "INVALID_DIRECTIVE"
     d = describe(dev)
     cur = dev.get("last_dps") or {}
     values = {}
@@ -489,17 +772,50 @@ def apply_directive(dev, state):
 
 
 # ------------------------------------------------------------------ polling: Tuya -> iHost
+def set_online(dev, online, why=None):
+    dev["online"] = online
+    if dev.get("ihost_sn") and online != dev.get("_online_reported"):
+        dev["_online_reported"] = online
+        report_online(dev, online)
+        if not online:
+            log("offline:", dev.get("name"), why or "")
+
+
+def poll_hub(hub):
+    """IR transmitter: online = answers on the network. Its ACs follow it."""
+    if not hub.get("ip") and not FAKE:
+        return
+    res = link_for(hub).status()
+    online = reachable(res)
+    set_online(hub, online, (res or {}).get("Error") if isinstance(res, dict) else None)
+    if online and not FAKE and not hub.get("ir_control_type") and hub["id"] not in DETECTING:
+        DETECTING.add(hub["id"])  # first IR send would otherwise spend ~3 s detecting the protocol
+
+        def detect():
+            try:
+                with link_for(hub).lock:
+                    ir_link(hub)._device()
+            except Exception as e:
+                log("IR transmitter type detection failed:", e)
+            finally:
+                DETECTING.discard(hub["id"])
+        threading.Thread(target=detect, daemon=True).start()
+    for d in CFG["devices"].values():
+        if special_kind(d) == "ac" and d.get("ihost_sn") and hub_for(d) is hub:
+            set_online(d, online, "IR transmitter unreachable")
+
+
 def poll_one(dev):
+    special = special_kind(dev)
+    if special == "ir_hub":
+        return poll_hub(dev)
+    if special:
+        return
     if not dev.get("ihost_sn") or (not dev.get("ip") and not FAKE):
         return
     res = link_for(dev).status()
     online = tuya_ok(res)
-    if online != dev.get("_online_reported"):
-        dev["_online_reported"] = online
-        dev["online"] = online
-        report_online(dev, online)
-        if not online:
-            log("offline:", dev.get("name"), (res or {}).get("Error"))
+    set_online(dev, online, (res or {}).get("Error"))
     if not online:
         return
     dps = dict(dev.get("last_dps") or {})
@@ -512,11 +828,25 @@ def poll_one(dev):
         report_state(dev, state)
 
 
+def poll_targets():
+    out = []
+    for d in CFG["devices"].values():
+        sk = special_kind(d)
+        if sk == "ir_hub":
+            used = d.get("ihost_sn") or any(special_kind(x) == "ac" and x.get("ihost_sn") and hub_for(x) is d
+                                            for x in CFG["devices"].values())
+            if used:
+                out.append(d)
+        elif not sk and d.get("ihost_sn"):
+            out.append(d)
+    return out
+
+
 def poller():
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
     while True:
         start = time.time()
-        devs = [d for d in CFG["devices"].values() if d.get("ihost_sn")]
+        devs = poll_targets()
         if devs and CFG["ihost"]["token"]:
             list(pool.map(lambda d: _safe(poll_one, d), devs))
         time.sleep(max(0.5, POLL_SECONDS - (time.time() - start)))
@@ -537,7 +867,8 @@ def merge_devices(items, source):
         if not dev_id:
             continue
         cur = CFG["devices"].get(dev_id, {"id": dev_id, "enabled": False, "ihost_sn": None})
-        for k in ("name", "key", "category", "product_name", "model", "mapping", "ip", "version", "mac", "dps_channels"):
+        for k in ("name", "key", "category", "product_name", "model", "mapping", "ip", "version", "mac", "dps_channels",
+                  "gateway_id", "parent", "node_id"):
             v = it.get(k) if k != "key" else (it.get("key") or it.get("local_key"))
             if v not in (None, "", {}):
                 cur[k] = v
@@ -593,13 +924,54 @@ def scan_worker():
 
 
 # ------------------------------------------------------------------ web
+LEARN = {}  # dev_id -> {"state": "waiting"|"done"|"error", "key":..., "message":...}
+
+SPECIAL_NOTES = {
+    "lock": "Door lock: no local control. Status, history and unlock are in the iHost Home app (Tuya cloud).",
+    "ir_hub": "IR transmitter: it sends the codes for your IR remotes (e.g. the AC). It doesn't need to be in the iHost.",
+    "ir_other": "IR remote: only air conditioners are supported so far.",
+}
+
+
+def learn_worker(dev_id, key):
+    dev = CFG["devices"].get(dev_id)
+    hub = hub_for(dev) if dev else None
+    if not hub:
+        LEARN[dev_id] = {"state": "error", "key": key, "message": "No IR transmitter linked to this AC"}
+        return
+    LEARN[dev_id] = {"state": "waiting", "key": key,
+                     "message": "Point the AC's remote at the IR transmitter and press the button now (15 s)..."}
+    try:
+        code = ir_link(hub).learn(15)
+    except Exception as e:
+        LEARN[dev_id] = {"state": "error", "key": key, "message": f"Learning failed: {e}"}
+        return
+    if not code:
+        LEARN[dev_id] = {"state": "error", "key": key, "message": "Nothing received - try again, closer to the transmitter."}
+        return
+    dev.setdefault("codes", {})[key] = code
+    save()
+    LEARN[dev_id] = {"state": "done", "key": key, "message": f"Learned '{key}'."}
+    log("learned IR code", key, "for", dev.get("name"))
+
+
 def public_device(d):
     desc = describe(d)
-    return {"id": d["id"], "name": d.get("name"), "ip": d.get("ip"), "version": d.get("version"),
-            "has_key": bool(d.get("key")), "category": d.get("category"), "product": d.get("product_name"),
-            "kind": desc.get("display"), "channels": len(desc.get("channels") or []) or 1,
-            "dimmable": bool(desc.get("bright")), "in_ihost": bool(d.get("ihost_sn")),
-            "online": d.get("online"), "state": ihost_state_from_dps(d, d.get("last_dps") or {}) if d.get("last_dps") else None}
+    special = desc.get("special")
+    out = {"id": d["id"], "name": d.get("name"), "ip": d.get("ip"), "version": d.get("version"),
+           "has_key": bool(d.get("key")), "category": d.get("category"), "product": d.get("product_name"),
+           "kind": special or desc.get("display"), "special": special, "note": SPECIAL_NOTES.get(special),
+           "channels": len(desc.get("channels") or []) or 1, "dimmable": bool(desc.get("bright")),
+           "in_ihost": bool(d.get("ihost_sn")), "online": d.get("online"),
+           "addable": special not in ("lock", "ir_hub", "ir_other"),
+           "state": ihost_state_from_dps(d, d.get("last_dps") or {}) if d.get("last_dps") and not special else None}
+    if special == "ac":
+        hub = hub_for(d)
+        out.update(ac=ac_state(d), codes=sorted((d.get("codes") or {}).keys()), hub=hub and {"id": hub["id"], "name": hub.get("name")},
+                   via=d.get("ac_via"), last_error=d.get("last_error"), learn=LEARN.get(d["id"]), cloud=cloud_ready())
+    if special == "ir_hub":
+        out["online"] = d.get("online")
+    return out
 
 
 def check_ui_auth(handler):
@@ -758,7 +1130,7 @@ class Handler(BaseHTTPRequestHandler):
             if action == "add" and method == "POST":
                 if not CFG["ihost"]["token"]:
                     return self.send_json({"error": "Connect the iHost first."}, 400)
-                if not dev.get("key"):
+                if not dev.get("key") and special_kind(dev) != "ac":
                     return self.send_json({"error": "This device has no local key - import it from the Tuya cloud or devices.json."}, 400)
                 return self.send_json({"serial_number": add_to_ihost(dev["id"])})
             if action == "remove" and method == "POST":
@@ -770,10 +1142,42 @@ class Handler(BaseHTTPRequestHandler):
                         dev[k] = str(b[k]).strip()
                 if "dps_channels" in b:
                     dev["dps_channels"] = [str(x).strip() for x in str(b["dps_channels"]).split(",") if str(x).strip()]
+                if b.get("ir_hub") and b["ir_hub"] in CFG["devices"]:
+                    dev["ir_hub"] = b["ir_hub"]
                 save()
                 return self.send_json(public_device(dev))
+            if action == "learn" and method == "POST":
+                key = str(b.get("key") or "").strip()
+                if special_kind(dev) != "ac" or not (key == "off" or key in ("fan", "dry")
+                                                     or (key.split("_")[0] in AC_MODES and key.split("_")[-1].isdigit())):
+                    return self.send_json({"error": "Pick a button to learn"}, 400)
+                if (LEARN.get(dev["id"]) or {}).get("state") != "waiting":
+                    threading.Thread(target=learn_worker, args=(dev["id"], key), daemon=True).start()
+                return self.send_json({"ok": True})
+            if action == "send-code" and method == "POST":
+                code = (dev.get("codes") or {}).get(str(b.get("key")))
+                hub = hub_for(dev)
+                if not code or not hub:
+                    return self.send_json({"error": "No such learned code"}, 404)
+                ir_link(hub).send(code)
+                return self.send_json({"ok": True})
+            if action == "delete-code" and method == "POST":
+                (dev.get("codes") or {}).pop(str(b.get("key")), None)
+                save()
+                return self.send_json({"ok": True})
             if action == "test" and method == "POST":
-                res = link_for(dev).status()
+                special = special_kind(dev)
+                target = hub_for(dev) if special == "ac" else dev
+                if special == "lock":
+                    return self.send_json({"ok": False, "error": SPECIAL_NOTES["lock"]})
+                if not target:
+                    return self.send_json({"ok": False, "error": "No IR transmitter linked"})
+                res = link_for(target).status()
+                if special in ("ir_hub", "ac", "ir_other"):
+                    ok = reachable(res)
+                    target["online"] = ok
+                    return self.send_json({"ok": ok, "dps": "IR transmitter answered" if ok else None,
+                                           "error": None if ok else (res or {}).get("Error")})
                 if tuya_ok(res):
                     dev["last_dps"] = res.get("dps") or {}
                     dev["online"] = True

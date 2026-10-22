@@ -110,6 +110,25 @@ Vercel's own login (Deployment Protection).
 - Adding iHosts, scanning, the free tunnel and the home PIN are home-version features.
 - **Security:** the token sits in Vercel's encrypted settings, and anyone who can open the Vercel project can read it. Keep the team small, use a long password, and never share the iHost's `?auth=` console link.
 
+### Door locks (Tuya cloud)
+
+Tuya Wi-Fi locks have no local API, so the cloud version talks to Tuya's cloud for them. It shows a **Door Locks**
+section with lock state, battery, door sensor, unlock history (30 days), alarms, the remote-unlock setting and every
+raw status code. **Unlock Door** asks for a separate unlock password every time.
+
+| Variable | Value |
+|---|---|
+| `TUYA_REGION` | data center of the Tuya cloud project: `eu`, `weu`, `us`, `ueaz`, `cn`, `in`, `sg` |
+| `TUYA_ACCESS_ID` / `TUYA_ACCESS_SECRET` | the project's Access ID and Access Secret (iot.tuya.com → Cloud → your project) |
+| `TUYA_LOCKS` | comma-separated Tuya device IDs of the locks |
+| `UNLOCK_PASSWORD` | 6+ characters and **different from `APP_PASSWORD`**. Without it, unlocking is disabled |
+
+- Every unlock needs the app sign-in **and** the unlock password. 5 wrong tries from one address, or 10 in total, block unlocking for 15–60 minutes. Each attempt is logged (`[unlock]` in Vercel → Logs) and the lock records it in its own history.
+- **Remote unlock** must be allowed for the lock in the Smart Life app. The cloud project also needs the **Smart Lock Open Service** API (Cloud → Service API → Go to Authorize). Battery locks may need to be awake (touch the keypad).
+- The lock data counts toward the free trial's monthly cloud calls. The app refreshes it every 2 minutes while open, roughly 100 calls a day with one phone. Unlocking stops working if the trial expires.
+
+`tests/locks_ac_test.py`: 29 checks covering locks and the AC sheet against a mock iHost and a signature-checking mock Tuya cloud. `tests/tuya_sign_check.py` checks the signing against tinytuya's.
+
 ## Using it
 
 | Action | How |

@@ -18,9 +18,13 @@
     home: '<path d="M12 3 2 11h3v9h5v-6h4v6h5v-9h3z"/>',
     warn: '<path d="M12 2 1 21h22zm-1 7h2v6h-2zm0 8h2v2h-2z"/>',
     battery: '<path d="M2 8a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v1h1a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-1v1a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2zm2 0v8h4V8z"/>',
+    ac: '<path d="M3 4h18a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zm2 6v1h14v-1zM7 15.5c0 1.5-1.2 1.8-1.2 3.3h1.6c0-1.1 1.2-1.6 1.2-3.3zm4.2 0c0 1.5-1.2 1.8-1.2 3.3h1.6c0-1.1 1.2-1.6 1.2-3.3zm4.2 0c0 1.5-1.2 1.8-1.2 3.3h1.6c0-1.1 1.2-1.6 1.2-3.3z"/>',
+    lock: '<path fill-rule="evenodd" d="M12 2a5 5 0 0 1 5 5v3h1a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h1V7a5 5 0 0 1 5-5zm0 2a3 3 0 0 0-3 3v3h6V7a3 3 0 0 0-3-3zm0 9.5a1.5 1.5 0 0 0-.8 2.8V18h1.6v-1.7a1.5 1.5 0 0 0-.8-2.8z"/>',
+    unlock: '<path fill-rule="evenodd" d="M12 2a5 5 0 0 1 5 5h-2a3 3 0 0 0-6 0v3h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h1V7a5 5 0 0 1 5-5zm0 11.5a1.5 1.5 0 0 0-.8 2.8V18h1.6v-1.7a1.5 1.5 0 0 0-.8-2.8z"/>',
   };
   const svg = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true">${P[name] || P.switch}</svg>`;
-  const ACCENT = { blind: "#0a84ff", light: "#ff9f0a", switch: "#ff9f0a", outlet: "#30d158", fan: "#0a84ff", motion: "#ff9f0a", sensor: "#64d2ff", door: "#ff9f0a" };
+  const ACCENT = { blind: "#0a84ff", light: "#ff9f0a", switch: "#ff9f0a", outlet: "#30d158", fan: "#0a84ff", motion: "#ff9f0a", sensor: "#64d2ff", door: "#ff9f0a",
+                   ac: "#64d2ff", lock: "#30d158", unlock: "#ff9f0a" };
   const DISPLAY_AS = [["light", "Light"], ["switch", "Switch"], ["outlet", "Outlet"], ["fan", "Fan"]];
   const DEFAULT_ROOM = "Default Room";
   const HOME = "__home";
@@ -40,6 +44,8 @@
     sheet: null,      // {type, key?, sub?}
     opener: null,
     loaded: false,
+    locks: [],        // Tuya cloud door locks (cloud version only)
+    lockDetail: {},   // id -> detail (history, alarms, ...)
   };
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -107,6 +113,17 @@
     return { icon, text: text || "Sensor", active, alert, battery: batt };
   }
 
+  const AC_MODES = [["cool", "Cool"], ["heat", "Heat"], ["auto", "Auto"], ["fan", "Fan"], ["dry", "Dry"]];
+  const AC_FANS = [["auto", "Auto"], ["low", "Low"], ["medium", "Med"], ["high", "High"]];
+  function acInfo(d) {
+    const st = d.state || {};
+    const mode = (st.mode && st.mode.airConditionerMode && st.mode.airConditionerMode.modeValue) || "cool";
+    const fan = (st.mode && st.mode.fanLevel && st.mode.fanLevel.modeValue) || "auto";
+    const sp = st["thermostat-target-setpoint"];
+    const temp = Number(sp && (sp["manual-mode"] || Object.values(sp)[0] || {}).targetSetpoint) || 24;
+    return { mode, fan, temp };
+  }
+
   /** Flatten devices into tiles */
   function accessories() {
     const out = [];
@@ -129,6 +146,11 @@
         }
       } else if (c.has("power")) {
         const key = d.serial_number;
+        if ((d.display_category || "") === "airConditioner") {
+          out.push({ key, sn: d.serial_number, ch: null, kind: "switch", device: d, room, online, name: d.name,
+            on: !!(st.power && st.power.powerState === "on"), icon: "ac", ac: acInfo(d), multi: false });
+          continue;
+        }
         out.push({
           key, sn: d.serial_number, ch: null, kind: "switch", device: d, room, online, name: d.name,
           on: !!(st.power && st.power.powerState === "on"), icon: S.prefs.icons[key] || defaultIcon(d), multi: false,
@@ -160,6 +182,7 @@
     if (!a.online) return "No Response";
     if (a.kind === "sensor") return a.sensor.text;
     if (a.cover) return a.pct >= 100 ? "Open" : a.pct <= 0 ? "Closed" : `${a.pct}% Open`;
+    if (a.ac) return a.on ? `${(AC_MODES.find((m) => m[0] === a.ac.mode) || ["", a.ac.mode])[1]} ${a.ac.mode === "fan" ? "" : a.ac.temp + "°"}`.trim() : "Off";
     return a.on ? "On" : "Off";
   }
 
@@ -220,7 +243,7 @@
 
   function renderContent() {
     const el = $("#content");
-    if (!S.devices.length) {
+    if (!S.devices.length && !S.locks.length) {
       el.innerHTML = `<div class="empty">No accessories found on the iHost.</div>`;
       return;
     }
@@ -229,6 +252,8 @@
     if (S.view === HOME) {
       const favs = S.prefs.favorites.map((k) => all.find((a) => a.key === k)).filter(Boolean);
       if (favs.length) html += section("Favorites", favs, null);
+      if (S.locks.length) html += `<section class="section"><div class="section-head"><h2>Door Locks</h2></div>
+        <div class="grid">${S.locks.map(lockTileHTML).join("")}</div></section>`;
       for (const r of rooms()) html += section(r, all.filter((a) => a.room === r), r);
     } else {
       html += section(S.view, all.filter((a) => a.room === S.view), S.view, true);
@@ -279,6 +304,24 @@
       applyLocal(a.sn, stateFor(a, prev));
       if (!quiet) handleError(e, `Couldn't turn ${on ? "on" : "off"} ${a.name}`);
       return false;
+    } finally {
+      S.busy.delete(a.key);
+      render();
+    }
+  }
+
+  async function setAc(a, patch) {
+    if (!a.online) return;
+    const d = findDev(a.sn);
+    const before = JSON.parse(JSON.stringify(d.state || {}));
+    applyLocal(a.sn, patch);
+    S.busy.add(a.key);
+    render();
+    try {
+      await api("PUT", hp(`/devices/${encodeURIComponent(a.sn)}`), { state: patch });
+    } catch (e) {
+      d.state = before;
+      handleError(e, `Couldn't change ${a.name}`);
     } finally {
       S.busy.delete(a.key);
       render();
@@ -404,6 +447,7 @@
     else if (sp.type === "settings") html = settingsSheet(sp);
     else if (sp.type === "list") html = listSheet(sp);
     else if (sp.type === "homes") html = homesSheet();
+    else if (sp.type === "lock") html = lockSheet(sp);
     if (html == null) { closeSheet(); return; }
     inner.innerHTML = html;
     inner.querySelectorAll("input:not([type=checkbox])").forEach((i) => {
@@ -446,6 +490,18 @@
         <button class="big-switch ${a.on && a.online ? "on" : ""}" data-act="toggle" style="--accent:${accent}" ${a.online ? "" : "disabled"}
           role="switch" aria-checked="${a.on}" aria-label="${esc(a.name)}"><span class="fill"></span><span class="glyph">${svg(a.icon)}</span></button>
         <div class="big-state">${a.online ? statusText(a) : "No Response"}</div></div>`;
+      if (a.ac) {
+        const dis = a.online ? "" : "disabled";
+        h += `<div class="group-label">Mode</div><div class="segmented" role="group" aria-label="Mode">${AC_MODES.map(([k, l]) =>
+            `<button data-ac-mode="${k}" aria-pressed="${a.ac.mode === k}" ${dis}>${l}</button>`).join("")}</div>
+          <div class="group-label">Temperature</div><div class="group"><div class="row ac-temp">
+            <button class="round-btn" data-ac-temp="-1" aria-label="Lower temperature" ${dis || (a.ac.temp <= 16 ? "disabled" : "")}>−</button>
+            <span class="ac-temp-val" aria-live="polite">${a.ac.temp}°C</span>
+            <button class="round-btn" data-ac-temp="1" aria-label="Raise temperature" ${dis || (a.ac.temp >= 30 ? "disabled" : "")}>+</button></div></div>
+          <div class="group-label">Fan Speed</div><div class="segmented" role="group" aria-label="Fan speed">${AC_FANS.map(([k, l]) =>
+            `<button data-ac-fan="${k}" aria-pressed="${a.ac.fan === k}" ${dis}>${l}</button>`).join("")}</div>
+          <div class="group-foot">Sent by infrared: the app shows the last command sent, not what the AC reports. Changes while off are remembered for the next time it's turned on.</div>`;
+      }
     } else {
       const rows = [];
       if (st.motion) rows.push(["Motion", st.motion.motion ? "Detected" : "Not Detected"]);
@@ -466,7 +522,7 @@
     </div>`;
     if (a.multi) h += `<div class="group-foot">Room applies to all ${channelsOf(d).length} switches on this device.</div>`;
 
-    if (a.kind === "switch" && !a.cover) {
+    if (a.kind === "switch" && !a.cover && !a.ac) {
       h += `<div class="group-label">Display As</div><div class="segmented" role="group" aria-label="Display as">${DISPLAY_AS.map(([k, l]) =>
         `<button data-icon="${k}" aria-pressed="${a.icon === k}">${svg(k)}${l}</button>`).join("")}</div>`;
     }
@@ -507,6 +563,130 @@
       <div class="group"><label class="row"><input class="inline" style="text-align:left;color:var(--ink)" id="newRoom" placeholder="Room name" maxlength="40" enterkeyhint="done" aria-label="New room name"></label></div>
       <div style="margin-top:14px"><button class="btn" data-act="add-room">Move to New Room</button></div>`;
     return h;
+  }
+
+  // ------------------------------------------------------------------ door locks (Tuya cloud)
+  const LOCK_LABELS = {
+    residual_electricity: ["Battery", (v) => `${v}%`], battery_state: ["Battery Level", (v) => String(v).replace(/^./, (c) => c.toUpperCase())],
+    lock_motor_state: ["Lock", (v) => (v ? "Unlocked" : "Locked")], closed_opened: ["Door", (v) => ({ open: "Open", closed: "Closed" }[v] || "Unknown")],
+    door_opened: ["Door", (v) => (v ? "Open" : "Closed")], hijack: ["Duress Alarm", (v) => (v ? "Triggered" : "No")],
+    doorbell: ["Doorbell", (v) => (v ? "Ringing" : "—")], alarm_lock: ["Alarm", (v) => String(v).replace(/_/g, " ")],
+    unlock_fingerprint: ["Last Fingerprint ID", String], unlock_password: ["Last Password ID", String], unlock_card: ["Last Card ID", String],
+    unlock_app: ["Last App Unlock ID", String], unlock_temporary: ["Last Temporary Password", String], unlock_key: ["Last Key Unlock", String],
+    unlock_face: ["Last Face ID", String], unlock_remote: ["Last Remote Unlock", String],
+  };
+  const UNLOCK_METHODS = { unlock_fingerprint: "Fingerprint", unlock_password: "Password", unlock_card: "Card", unlock_app: "App",
+    unlock_remote: "Remote", unlock_temporary: "Temporary password", unlock_key: "Key", unlock_face: "Face", unlock_dynamic: "Dynamic password",
+    unlock_ble: "Bluetooth", unlock_voice_remote: "Voice", alarm_lock: "Alarm", hijack: "Duress alarm", doorbell: "Doorbell", door_opened: "Door opened" };
+  function lockState(l) {
+    const s = l.status || {};
+    if (!l.online && l.error) return { text: "Unavailable", locked: null };
+    if (typeof s.lock_motor_state === "boolean") return { text: s.lock_motor_state ? "Unlocked" : "Locked", locked: !s.lock_motor_state };
+    if (s.closed_opened === "open" || s.door_opened === true) return { text: "Door Open", locked: false };
+    if (s.closed_opened === "closed") return { text: "Door Closed", locked: null };
+    return { text: l.online ? "Online" : "Asleep", locked: null };
+  }
+  function lockBattery(l) { const s = l.status || {}; return typeof s.residual_electricity === "number" ? s.residual_electricity : null; }
+  function lockTileHTML(l) {
+    const st = lockState(l), b = lockBattery(l);
+    const low = b != null && b <= 20;
+    const status = low ? `Low Battery ${b}%` : `${st.text}${b != null ? ` · ${b}%` : ""}`;
+    return `<button class="tile ${st.locked === false ? "on" : ""}" data-lock="${esc(l.id)}" style="--accent:${st.locked === false ? ACCENT.unlock : ACCENT.lock}"
+        aria-label="${esc(`${l.name}, ${status}. Press for details and unlock`)}">
+      <span class="t-icon">${svg(st.locked === false ? "unlock" : "lock")}</span>
+      <span class="t-text"><span class="t-name">${esc(l.name)}</span><span class="t-status${low ? " alert" : ""}">${esc(status)}</span></span></button>`;
+  }
+  async function loadLocks() {
+    if (!S.session.locks) return;
+    try { S.locks = (await api("GET", "/api/locks")).locks || []; if (S.loaded) render(); } catch { /* keep last */ }
+  }
+  async function loadLockDetail(id) {
+    try { S.lockDetail[id] = await api("GET", `/api/locks/${encodeURIComponent(id)}`); }
+    catch (e) { S.lockDetail[id] = { error: e.message }; }
+    if (S.sheet && S.sheet.type === "lock" && S.sheet.id === id) renderSheet();
+  }
+  const fmtTime = (v) => {
+    if (!v) return "";
+    const ms = v < 1e12 ? v * 1000 : v;
+    return new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  };
+  function logLine(e) {
+    const st = Array.isArray(e.status) ? e.status : e.status ? [e.status] : [];
+    const what = st.map((x) => (x.code === "alarm_lock" && x.value ? `Alarm: ${String(x.value).replace(/_/g, " ")}`
+      : UNLOCK_METHODS[x.code] || String(x.code || "").replace(/_/g, " "))).filter(Boolean).join(", ")
+      || e.unlock_name || e.type || "Event";
+    const v0 = st[0] && st[0].code !== "alarm_lock" ? st[0].value : null;
+    const who = e.nick_name || e.user_name || e.unlock_name || (v0 != null && typeof v0 !== "boolean" ? `#${v0}` : "");
+    return { when: fmtTime(e.update_time || e.gmt_create || e.time), what, who: who && who !== what ? who : "" };
+  }
+  function lockSheet(sp) {
+    const base = S.locks.find((l) => l.id === sp.id) || { id: sp.id, name: "Door Lock", status: {} };
+    const d = S.lockDetail[sp.id];
+    const l = d && !d.error ? d : base;
+    const st = lockState(l);
+    let h = head(st.locked === false ? "unlock" : "lock", st.locked === false, l.name, `${l.online ? "Online" : "Asleep / offline"} · Tuya cloud`,
+                 st.locked === false ? ACCENT.unlock : ACCENT.lock);
+    h += `<div class="big-switch-wrap"><div class="big-lock ${st.locked === false ? "open" : ""}">${svg(st.locked === false ? "unlock" : "lock")}</div>
+      <div class="big-state">${esc(st.text)}</div></div>`;
+    // unlock
+    h += `<div class="group-label">Remote Unlock</div><form class="group unlock-form" data-form="unlock">
+        <label class="row"><span class="lbl">Unlock Password</span><input class="inline" type="password" id="unlockPw" autocomplete="off" inputmode="text" placeholder="Required" aria-label="Unlock password"></label>
+      </form>
+      <div style="margin-top:10px"><button class="btn danger-btn" data-act="unlock" ${S.busy.has("unlock:" + l.id) ? "disabled" : ""}>${S.busy.has("unlock:" + l.id) ? "Unlocking…" : "Unlock Door"}</button></div>
+      <div class="group-foot">Every unlock asks for the unlock password and is recorded in the lock's history and the server log.
+        Battery Wi-Fi locks may need to be awake (touch the keypad) to accept a remote unlock.</div>`;
+    if (d && d.remote_unlock) {
+      const rows = (Array.isArray(d.remote_unlock) ? d.remote_unlock : [d.remote_unlock]).map((r) => {
+        const label = { remoteUnlockWithoutPwd: "Remote unlock (Smart Life setting)", remoteUnlockWithPwd: "Remote unlock with lock password" }[r.remote_unlock_type]
+          || String(r.remote_unlock_type || "Remote unlock").replace(/([A-Z])/g, " $1");
+        return `<div class="row"><span class="lbl">${esc(label)}</span><span class="val">${r.open ? "Allowed" : "Off – enable in Smart Life"}</span></div>`;
+      }).join("");
+      if (rows) h += `<div class="group">${rows}</div>`;
+    }
+    // status
+    const s = l.status || {};
+    const known = Object.keys(LOCK_LABELS).filter((k) => k in s && s[k] !== "" && s[k] != null);
+    const rows = known.map((k) => [LOCK_LABELS[k][0], LOCK_LABELS[k][1](s[k])]);
+    h += `<div class="group-label">Status</div><div class="group">
+      ${rows.map(([k, v]) => `<div class="row"><span class="lbl">${esc(k)}</span><span class="val">${esc(v)}</span></div>`).join("")}
+      <div class="row"><span class="lbl">Connection</span><span class="val">${l.online ? "Online" : "Offline / asleep"}</span></div>
+      ${l.updated ? `<div class="row"><span class="lbl">Last Update</span><span class="val">${esc(fmtTime(l.updated))}</span></div>` : ""}</div>`;
+    // history
+    if (!d) h += `<div class="group-label">History</div><div class="empty">Loading…</div>`;
+    else if (d.error) h += `<div class="group-label">History</div><div class="group-foot">${esc(d.error)}</div>`;
+    else {
+      const list = (d.history || []).slice(0, 20).map(logLine);
+      h += `<div class="group-label">Unlock History (30 days)</div>${d.history_error ? `<div class="group-foot">${esc(d.history_error)}</div>`
+        : list.length ? `<div class="group">${list.map((x) => `<div class="row"><span class="lbl">${esc(x.what)}${x.who ? ` <span class="muted-inline">· ${esc(x.who)}</span>` : ""}</span><span class="val">${esc(x.when)}</span></div>`).join("")}</div>`
+        : `<div class="group-foot">No unlocks recorded.</div>`}`;
+      const al = (d.alarms || []).slice(0, 10).map(logLine);
+      if (al.length) h += `<div class="group-label">Alarms</div><div class="group">${al.map((x) => `<div class="row"><span class="lbl">${esc(x.what)}</span><span class="val">${esc(x.when)}</span></div>`).join("")}</div>`;
+    }
+    // everything else
+    const other = Object.keys(s).filter((k) => !known.includes(k));
+    h += `<div class="group-label">Device</div><div class="group">
+      ${[["Model", l.product || l.model], ["Category", l.category], ["Device ID", l.id]].filter((r) => r[1]).map(([k, v]) => `<div class="row"><span class="lbl">${k}</span><span class="val mono">${esc(v)}</span></div>`).join("")}
+      ${other.map((k) => `<div class="row"><span class="lbl mono">${esc(k)}</span><span class="val mono">${esc(typeof s[k] === "object" ? JSON.stringify(s[k]) : String(s[k]))}</span></div>`).join("")}</div>`;
+    return h;
+  }
+  async function doUnlock(id) {
+    const pwEl = $("#unlockPw");
+    const pw = pwEl ? pwEl.value : "";
+    const l = S.locks.find((x) => x.id === id) || { name: "the door" };
+    if (!pw) { toast("Enter the unlock password", true); return pwEl && pwEl.focus(); }
+    if (!confirm(`Unlock ${l.name} now?`)) return;
+    S.busy.add("unlock:" + id); renderSheet(true);
+    try {
+      await api("POST", `/api/locks/${encodeURIComponent(id)}/unlock`, { password: pw });
+      toast(`${l.name} unlocked`);
+      setTimeout(() => { loadLocks(); loadLockDetail(id); }, 2500);
+    } catch (e) {
+      if (e instanceof AuthError) return showLogin();
+      toast(e.message, true);
+    } finally {
+      S.busy.delete("unlock:" + id);
+      if (S.sheet && S.sheet.type === "lock") { renderSheet(true); const p = $("#unlockPw"); if (p) p.value = ""; }
+    }
   }
 
   function listSheet(sp) {
@@ -898,6 +1078,7 @@
     S.loaded = true;
     render();
     connectEvents();
+    loadLocks();
   }
 
   function switchHub(id) {
@@ -926,7 +1107,7 @@
 
   content.addEventListener("pointerdown", (e) => {
     const tile = e.target.closest(".tile");
-    if (!tile || e.button !== 0) return;
+    if (!tile || e.button !== 0 || tile.dataset.lock) return;
     pressStart = [e.clientX, e.clientY];
     tile.classList.add("pressing");
     pressTimer = setTimeout(() => {
@@ -943,7 +1124,7 @@
   ["pointerup", "pointercancel", "pointerleave"].forEach((t) => content.addEventListener(t, cancelPress));
   content.addEventListener("contextmenu", (e) => {
     const tile = e.target.closest(".tile");
-    if (!tile) return;
+    if (!tile || tile.dataset.lock) return;
     e.preventDefault();
     cancelPress();
     if (!justLongPressed()) openSheet({ type: "acc", key: tile.dataset.key }, tile);
@@ -953,6 +1134,11 @@
     if (off) {
       const r = off.dataset.roomOff;
       return turnOffMany(accessories().filter((a) => a.room === r), r);
+    }
+    const lt = e.target.closest("[data-lock]");
+    if (lt) {
+      openSheet({ type: "lock", id: lt.dataset.lock }, lt);
+      return loadLockDetail(lt.dataset.lock);
     }
     const tile = e.target.closest(".tile");
     if (!tile) return;
@@ -995,15 +1181,23 @@
   window.addEventListener("scroll", () => $("#topbar").classList.toggle("scrolled", window.scrollY > 8), { passive: true });
   document.addEventListener("visibilitychange", () => { if (!document.hidden && S.loaded) refresh(); });
   setInterval(() => { if (S.loaded && !document.hidden) refresh(); }, 60000);
+  setInterval(() => { if (S.loaded && !document.hidden) loadLocks(); }, 120000); // Tuya cloud: keep the monthly call quota low
 
   // ------------------------------------------------------------------ events: sheet
   const sheetEl = $("#sheet");
   sheetEl.addEventListener("click", async (e) => {
-    const t = e.target.closest("[data-act],[data-icon],[data-set-room],[data-edit-room],[data-open],[data-hub],[data-mode]");
+    const t = e.target.closest("[data-act],[data-icon],[data-set-room],[data-edit-room],[data-open],[data-hub],[data-mode],[data-ac-mode],[data-ac-fan],[data-ac-temp]");
     if (!t) return;
     const sp = S.sheet;
     if (!sp) return;
     const a = sp.key ? findAcc(sp.key) : null;
+    if (a && a.ac && (t.dataset.acMode || t.dataset.acFan || t.dataset.acTemp)) {
+      if (t.dataset.acMode) return setAc(a, { mode: { airConditionerMode: { modeValue: t.dataset.acMode } } });
+      if (t.dataset.acFan) return setAc(a, { mode: { fanLevel: { modeValue: t.dataset.acFan } } });
+      const temp = Math.max(16, Math.min(30, a.ac.temp + Number(t.dataset.acTemp)));
+      return setAc(a, { "thermostat-target-setpoint": { "manual-mode": { targetSetpoint: temp } } });
+    }
+    if (sp.type === "lock" && t.dataset.act === "unlock") return doUnlock(sp.id);
     if (t.dataset.open) return openSheet({ type: "acc", key: t.dataset.open });
     if (t.dataset.hub) return switchHub(t.dataset.hub);
     if (t.dataset.mode) {
@@ -1115,6 +1309,7 @@
     }
   });
   sheetEl.addEventListener("submit", async (e) => {
+    if (e.target.dataset.form === "unlock") { e.preventDefault(); if (S.sheet && S.sheet.type === "lock") doUnlock(S.sheet.id); return; }
     if (e.target.dataset.form !== "password") return;
     e.preventDefault();
     const cur = $("#pwCurrent"), n1 = $("#pwNew").value, n2 = $("#pwNew2").value;

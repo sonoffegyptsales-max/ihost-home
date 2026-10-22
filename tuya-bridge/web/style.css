@@ -38,3 +38,9 @@ dialog { background:var(--card); color:var(--fg); border:1px solid var(--border)
 dialog form { display:flex; flex-direction:column; gap:10px; } dialog h3 { margin:0; }
 dialog menu { display:flex; justify-content:flex-end; gap:8px; padding:0; margin:6px 0 0; }
 dialog::backdrop { background:rgba(0,0,0,.5); }
+.meta.note { color:var(--warn); margin-top:2px; }
+.small { font-size:12px; }
+.row select { width:auto; }
+.code-row { display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-top:1px solid var(--border); }
+.code-row span { display:flex; gap:6px; }
+#codesDlg { width:min(520px,94vw); }

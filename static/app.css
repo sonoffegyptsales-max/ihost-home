@@ -347,3 +347,17 @@ svg { display: block; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; }
 }
+
+/* AC controls */
+.ac-temp { justify-content: space-between; padding-top: 10px; padding-bottom: 10px; }
+.ac-temp-val { font-size: 34px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.round-btn { width: 44px; height: 44px; border-radius: 50%; border: 0; background: var(--icon-off-bg); color: var(--ink); font-size: 26px; line-height: 1; cursor: pointer; }
+.round-btn:disabled { opacity: .35; cursor: default; }
+/* door locks */
+.big-lock { width: 112px; height: 112px; margin: 6px auto 0; border-radius: 32px; display: grid; place-items: center; background: #30d15826; }
+.big-lock svg { width: 54px; height: 54px; fill: #30d158; }
+.big-lock.open { background: #ff9f0a26; }
+.big-lock.open svg { fill: #ff9f0a; }
+.btn.danger-btn { background: #ff453a; color: #fff; }
+.muted-inline { color: var(--ink-2); font-weight: 400; }
+.unlock-form { margin: 0; }
