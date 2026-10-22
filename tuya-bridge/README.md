@@ -65,6 +65,18 @@ Notes: the iHost firmware requires `header.version: "2"` on `/thirdparty/event` 
   That needs the Tuya cloud keys and an active IoT Core trial. Learn your common states to stay fully local.
 - IR is one-way: the iHost shows the last command sent, not what the AC really does.
 
+### AC without internet
+
+The Tuya cloud never hands out the AC's IR signals, so **offline control needs learned codes**. On the bridge page,
+open the AC's **IR codes** and press **Learn the basics (7 steps)**: Off, Cool 22-26 and Fan. Each step is one press of your
+real remote, pointed at the IR transmitter. After that:
+- learned states are sent locally (no internet needed);
+- a temperature you didn't learn uses the nearest learned one of the same mode while offline (Cool 25 asked, Cool 24 sent);
+- with the internet up, anything not learned still goes through the Tuya cloud.
+
+If the IR transmitter stops answering (the router often gives it a new IP), the bridge listens for Tuya broadcasts and
+updates the address by itself (at most every `REDISCOVER_SECONDS`, default 300).
+
 ## Door locks
 
 Tuya Wi-Fi locks have no local control. Everything goes through the Tuya cloud (keys from step 2).

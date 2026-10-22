@@ -70,7 +70,7 @@ DEVICES = [
     {"name": "ZZ Test AC", "id": AC, "key": "0123456789abcdef", "category": "infrared_ac", "product_name": "AC"},
     {"name": "ZZ Test Lock", "id": LOCK, "key": "0123456789abcdef", "category": "videolock", "product_name": "Smart Lock"},
 ]
-env = dict(os.environ, BRIDGE_FAKE_TUYA="1", DATA_DIR=DATA, PORT=str(PORT), POLL_SECONDS="1.5")
+env = dict(os.environ, BRIDGE_FAKE_TUYA="1", DATA_DIR=DATA, PORT=str(PORT), POLL_SECONDS="1.5", REDISCOVER_SECONDS="2")
 proc = subprocess.Popen([sys.executable, os.path.join(HERE, "..", "bridge.py")], env=env,
                         stdout=open(os.path.join(DATA, "bridge.log"), "w"), stderr=subprocess.STDOUT)
 sn = None
@@ -134,9 +134,32 @@ try:
     r = ih("PUT", f"/devices/{sn}", {"state": {"thermostat-target-setpoint": {"manual-mode": {"targetSetpoint": 26}}}})
     check("changing temp while OFF sends nothing (just remembered)", r.get("error") == 0 and len(store().get("_cloud", [])) == n_cloud)
 
-    # transmitter offline -> AC offline
+    # no internet: learned code / nearest learned code still work, nothing learned -> clear error
+    s0 = store()
+    s0["_cloud_down"] = True
+    json.dump(s0, open(os.path.join(DATA, "fake_tuya.json"), "w"))
+    ih("PUT", f"/devices/{sn}", {"state": {"mode": {"airConditionerMode": {"modeValue": "cool"}}}})  # while off: remembered
+    ih("PUT", f"/devices/{sn}", {"state": {"thermostat-target-setpoint": {"manual-mode": {"targetSetpoint": 25}}}})
+    r = ih("PUT", f"/devices/{sn}", {"state": {"power": {"powerState": "on"}}})
+    s = store()
+    check("NO INTERNET: cool 25 (not learned) -> nearest learned cool 22 sent locally",
+          r.get("error") == 0 and s[HUB].get("_sent", [])[-1:] == ["FAKECODE_COOL22"], (r, s[HUB].get("_sent")))
+    r = ih("PUT", f"/devices/{sn}", {"state": {"mode": {"airConditionerMode": {"modeValue": "heat"}}}})
+    check("NO INTERNET: heat (nothing learned) -> iHost gets an error, not a silent success", r.get("error") != 0, r)
+    s0 = store()
+    s0["_cloud_down"] = False
+    json.dump(s0, open(os.path.join(DATA, "fake_tuya.json"), "w"))
+    st = next(x for x in http("GET", B + "/api/status")["devices"] if x["id"] == AC)
+    check("bridge page shows it was sent locally (nearest)", "nearest" in str(st.get("via")), st.get("via"))
+
+    # transmitter got a new IP from the router -> the bridge finds it again by itself
+    s0 = store()
+    s0["_scan"] = {HUB: {"ip": "10.9.9.9", "version": "3.3"}}
+    json.dump(s0, open(os.path.join(DATA, "fake_tuya.json"), "w"))
     store_set(HUB, _offline=True)
-    check("IR transmitter unplugged -> AC offline in iHost", wait(lambda: ihost_dev(sn)["online"] is False, 10))
+    check("IR transmitter unreachable -> bridge re-discovers its new IP",
+          wait(lambda: next(x for x in http("GET", B + "/api/status")["devices"] if x["id"] == HUB).get("ip") == "10.9.9.9", 40))
+    check("...AC stays usable meanwhile (cloud keys set)", ihost_dev(sn)["online"] is True)
     store_set(HUB, _offline=False)
     check("IR transmitter back -> AC online", wait(lambda: ihost_dev(sn)["online"] is True, 10))
 finally:

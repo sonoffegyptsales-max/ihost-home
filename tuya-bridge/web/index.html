@@ -82,9 +82,11 @@
 <dialog id="codesDlg">
   <form method="dialog">
     <h3 id="cTitle">IR codes</h3>
-    <p class="muted small">Teach the bridge your AC remote, one state at a time. Set the remote to the state first
-      (e.g. Cool, 24°), then press <b>Learn</b> and press any button on the remote while pointing it at the IR transmitter
-      — AC remotes send the whole state with every press. Commands without a learned code use the Tuya cloud (if set up).</p>
+    <p class="muted small">To control the AC <b>without internet</b>, teach the bridge your AC remote. AC remotes send the whole
+      state with every press, so set the remote first (e.g. Cool 24°), press <b>Learn</b>, then press the remote's button once
+      while pointing it at the IR transmitter. Missing temperatures use the nearest learned one when offline.</p>
+    <button type="button" id="cGuideBtn">Learn the basics (7 steps)</button>
+    <p id="cGuide" class="hint"></p>
     <div class="row">
       <select id="cMode" aria-label="Mode"><option value="off">Off</option><option value="cool" selected>Cool</option>
         <option value="heat">Heat</option><option value="auto">Auto</option><option value="fan">Fan only</option><option value="dry">Dry</option></select>
@@ -107,6 +109,7 @@
     <menu><button type="button" id="aCancel" class="ghost">Cancel</button><button type="submit" class="dangerbtn">Allow</button></menu>
   </form>
 </dialog>
+<dialog id="askDlg"><p id="askText"></p><menu><button type="button" id="askNo" class="ghost">Cancel</button><button type="button" id="askYes" class="dangerbtn">Yes</button></menu></dialog>
 <script src="app.js"></script>
 </body>
 </html>

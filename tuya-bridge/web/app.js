@@ -115,13 +115,39 @@ function renderCodes() {
   if (!d) return;
   $("#cTitle").textContent = `IR codes – ${d.name}`;
   const L = d.learn || {};
-  msg($("#cMsg"), L.message || "", L.state === "error" ? "err" : L.state === "done" ? "ok" : "");
+  // guided "basics": when the current step got learned, move the pickers to the next missing one
+  if (GUIDE.on) {
+    const next = GUIDE_KEYS.find((k) => !d.codes.includes(k));
+    if (!next) { GUIDE.on = false; msg($("#cMsg"), "All the basics are learned – the AC now works without internet.", "ok"); }
+    else if (next !== GUIDE.cur && L.state !== "waiting") { GUIDE.cur = next; setPickers(next); }
+  }
+  if (!GUIDE.on || L.state === "waiting" || L.state === "error") msg($("#cMsg"), L.message || "", L.state === "error" ? "err" : L.state === "done" ? "ok" : "");
+  if (GUIDE.on && L.state !== "waiting") {
+    const n = GUIDE_KEYS.filter((k) => d.codes.includes(k)).length;
+    $("#cGuide").innerHTML = `Step ${n + 1} of ${GUIDE_KEYS.length}: set your AC remote to <b>${esc(label(GUIDE.cur))}</b>, then press <b>Learn</b> and press the remote's power/temperature button once, pointed at the IR transmitter.`;
+  } else if (!GUIDE.on) $("#cGuide").textContent = "";
   $("#cLearn").disabled = L.state === "waiting";
-  $("#cList").innerHTML = d.codes.length ? d.codes.map((k) => `<div class="code-row"><code>${esc(k)}</code>
+  $("#cList").innerHTML = d.codes.length ? d.codes.map((k) => `<div class="code-row"><code>${esc(label(k))}</code>
       <span><button type="button" class="ghost" data-code-send="${esc(k)}">Send</button>
       <button type="button" class="danger" data-code-del="${esc(k)}">Delete</button></span></div>`).join("")
-    : '<p class="muted">No codes learned yet.</p>';
+    : '<p class="muted">No codes learned yet – the AC only works while the internet (Tuya cloud) is up.</p>';
 }
+const GUIDE_KEYS = ["off", "cool_22", "cool_23", "cool_24", "cool_25", "cool_26", "fan"];
+const GUIDE = { on: false, cur: null };
+function label(k) {
+  if (k === "off") return "Off";
+  if (k === "fan") return "Fan only";
+  if (k === "dry") return "Dry";
+  const [m, t] = k.split("_");
+  return `${m[0].toUpperCase()}${m.slice(1)} ${t}°`;
+}
+function setPickers(k) {
+  const [m, t] = k.split("_");
+  $("#cMode").value = m;
+  if (t) $("#cTemp").value = t;
+  $("#cTemp").disabled = ["off", "fan", "dry"].includes(m);
+}
+$("#cGuideBtn").addEventListener("click", () => { GUIDE.on = true; GUIDE.cur = null; renderCodes(); });
 function codeKey() {
   const m = $("#cMode").value;
   if (m === "off") return "off";
@@ -137,7 +163,7 @@ $("#cList").addEventListener("click", async (e) => {
   const s = e.target.closest("[data-code-send]"), del = e.target.closest("[data-code-del]");
   try {
     if (s) { await api("POST", `/api/devices/${encodeURIComponent(codesFor)}/send-code`, { key: s.dataset.codeSend }); msg($("#cMsg"), `Sent '${s.dataset.codeSend}'`, "ok"); }
-    if (del && confirm(`Delete code '${del.dataset.codeDel}'?`)) await api("POST", `/api/devices/${encodeURIComponent(codesFor)}/delete-code`, { key: del.dataset.codeDel });
+    if (del && await ask(`Delete code '${del.dataset.codeDel}'?`)) await api("POST", `/api/devices/${encodeURIComponent(codesFor)}/delete-code`, { key: del.dataset.codeDel });
   } catch (err) { msg($("#cMsg"), err.message, "err"); }
   refresh();
 });
@@ -151,8 +177,8 @@ $("#devices").addEventListener("click", async (e) => {
   btn.disabled = true;
   try {
     if (act === "add") { await api("POST", `/api/devices/${encodeURIComponent(id)}/add`); msg(out, `✓ ${d.name} added to the iHost`, "ok"); }
-    if (act === "remove" && confirm(`Remove "${d.name}" from the iHost? (Scenes using it will break.)`)) { await api("POST", `/api/devices/${encodeURIComponent(id)}/remove`); msg(out, "Removed from the iHost"); }
-    if (act === "delete" && confirm(`Forget "${d.name}"?`)) await api("DELETE", `/api/devices/${encodeURIComponent(id)}`);
+    if (act === "remove" && await ask(`Remove "${d.name}" from the iHost? (Scenes using it will break.)`)) { await api("POST", `/api/devices/${encodeURIComponent(id)}/remove`); msg(out, "Removed from the iHost"); }
+    if (act === "delete" && await ask(`Forget "${d.name}"?`)) await api("DELETE", `/api/devices/${encodeURIComponent(id)}`);
     if (act === "test") {
       const r = await api("POST", `/api/devices/${encodeURIComponent(id)}/test`);
       msg(out, r.ok ? `✓ ${d.name} answered: ${JSON.stringify(r.dps)}` : `✗ ${d.name}: ${r.error}. Check the IP, and try another protocol version in Edit.`, r.ok ? "ok" : "err");
@@ -170,7 +196,7 @@ $("#devices").addEventListener("click", async (e) => {
     }
     if (act === "disallow-unlock") { await api("POST", `/api/devices/${encodeURIComponent(id)}/unlock-enable`, { enabled: false }); msg(out, "Unlock from the iHost turned off (switch removed)."); }
     if (act === "add-unlock") { await api("POST", `/api/devices/${encodeURIComponent(id)}/add-unlock`); msg(out, `"${d.name} Unlock" switch added to the iHost`, "ok"); }
-    if (act === "remove-unlock" && confirm("Remove the unlock switch from the iHost?")) { await api("POST", `/api/devices/${encodeURIComponent(id)}/remove-unlock`); msg(out, "Unlock switch removed"); }
+    if (act === "remove-unlock" && await ask("Remove the unlock switch from the iHost?")) { await api("POST", `/api/devices/${encodeURIComponent(id)}/remove-unlock`); msg(out, "Unlock switch removed"); }
     if (act === "edit") {
       editing = d; $("#eName").value = d.name || ""; $("#eIp").value = d.ip || ""; $("#eVer").value = d.version || "3.3"; $("#eDps").value = "";
       const hubs = S.devices.filter((x) => x.special === "ir_hub");
@@ -227,3 +253,16 @@ $("#allowForm").addEventListener("submit", async (e) => {
   refresh();
 });
 $("#aCancel").addEventListener("click", () => $("#allowDlg").close());
+
+// ---- in-page yes/no (window.confirm is silently blocked in some in-app browsers, e.g. the iHost console)
+function ask(text) {
+  return new Promise((resolve) => {
+    const dlg = $("#askDlg");
+    $("#askText").textContent = text;
+    const done = (v) => { dlg.close(); resolve(v); };
+    $("#askYes").onclick = () => done(true);
+    $("#askNo").onclick = () => done(false);
+    dlg.oncancel = () => resolve(false);
+    dlg.showModal();
+  });
+}

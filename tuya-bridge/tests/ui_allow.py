@@ -8,7 +8,10 @@ shutil.rmtree(OUT, ignore_errors=True); os.makedirs(OUT)
 json.dump({"ihost": {"host": "http://127.0.0.1:9", "token": ""}, "tuya": {"region": "eu", "api_key": "fake", "api_secret": "fake"},
            "devices": {"L1": {"id": "L1", "name": "Smart Door Lock", "category": "videolock", "product_name": "Smart Lock",
                               "lock_status": {"lock_motor_state": False, "residual_electricity": 68}, "lock_checked": time.time(),
-                              "last_unlocked": {"at": time.time() - 300, "method": "fingerprint"}}}}, open(f"{OUT}/config.json", "w"))
+                              "last_unlocked": {"at": time.time() - 300, "method": "fingerprint"}},
+                       "H1": {"id": "H1", "name": "Smart IR", "category": "wnykq", "key": "0123456789abcdef", "ip": "10.0.0.5"},
+                       "A1": {"id": "A1", "name": "Air Conditioning", "category": "infrared_ac", "ir_hub": "H1",
+                              "codes": {"off": "X", "cool_22": "Y"}}}}, open(f"{OUT}/config.json", "w"))
 br = subprocess.Popen([PY, os.path.join(HERE, "..", "bridge.py")], env=dict(os.environ, BRIDGE_FAKE_TUYA="1", DATA_DIR=OUT, PORT="8325"),
                       stdout=open(f"{OUT}/bridge.log", "w"), stderr=subprocess.STDOUT)
 ch = subprocess.Popen([r"C:\Program Files\Google\Chrome\Application\chrome.exe", "--headless=new", "--remote-debugging-port=19343",
@@ -42,8 +45,20 @@ try:
     check("wrong word is rejected in the dialog", wait("document.querySelector('#aMsg').textContent.includes('UNLOCK') && document.querySelector('#allowDlg').open"))
     js("document.querySelector('#aWord').value='unlock'; document.querySelector('#allowForm').requestSubmit()")
     check("typing UNLOCK allows it and closes the dialog", wait("!document.querySelector('#allowDlg').open && !!document.querySelector('[data-act=add-unlock]')"))
-    st = json.load(urllib.request.urlopen("http://127.0.0.1:8325/api/status"))["devices"][0]
+    st = next(x for x in json.load(urllib.request.urlopen("http://127.0.0.1:8325/api/status"))["devices"] if x["id"] == "L1")
     check("bridge saved unlock_enabled", st["unlock_enabled"] is True, st)
+    js("document.querySelector('[data-act=codes]').click()")
+    check("AC: IR codes dialog opens", wait("document.querySelector('#codesDlg').open"))
+    js("document.querySelector('#cGuideBtn').click()")
+    check("guided learning jumps to the first missing step (Cool 23)", wait("document.querySelector('#cGuide').textContent.includes('Step 3 of 7') && document.querySelector('#cGuide').textContent.includes('Cool 23')")
+          and js("document.querySelector('#cMode').value + '_' + document.querySelector('#cTemp').value") == "cool_23",
+          js("document.querySelector('#cGuide').textContent"))
+    open(f"{OUT}/learn.png", "wb").write(base64.b64decode(cdp("Page.captureScreenshot", format="png")["data"]))
+    js("document.querySelector('[data-code-del]').click()")
+    check("Delete asks with the in-page dialog (no browser confirm)", wait("document.querySelector('#askDlg').open"))
+    js("document.querySelector('#askNo').click()")
+    check("Cancel keeps the code", wait("!document.querySelector('#askDlg').open") and json.load(urllib.request.urlopen("http://127.0.0.1:8325/api/status"))["devices"] and
+          len(next(d for d in json.load(urllib.request.urlopen("http://127.0.0.1:8325/api/status"))["devices"] if d["id"] == "A1")["codes"]) == 2)
     print("FAILURES:", fails, "| shot:", f"{OUT}/allow.png")
 finally:
     ch.terminate(); br.terminate()

@@ -51,6 +51,11 @@ def wait(fn, t=15):
 
 
 def store():
+    for _ in range(20):  # the bridge may be mid-write
+        try:
+            return json.load(open(os.path.join(DATA, "fake_tuya.json")))
+        except ValueError:
+            time.sleep(0.05)
     return json.load(open(os.path.join(DATA, "fake_tuya.json")))
 
 

@@ -949,21 +949,49 @@ def ac_code_key(s):
     return s["mode"] if s["mode"] in ("fan", "dry") else f"{s['mode']}_{s['temp']}"
 
 
+def nearest_code(dev, s):
+    """No exact learned code: same mode, nearest learned temperature (e.g. 24 asked, 25 learned)."""
+    codes = dev.get("codes") or {}
+    if s["power"] == "off" or s["mode"] in ("fan", "dry"):
+        return None, None
+    best = None
+    for k in codes:
+        m, _, t = k.partition("_")
+        if m == s["mode"] and t.isdigit():
+            dist = abs(int(t) - int(s["temp"]))
+            if best is None or dist < best[0]:
+                best = (dist, k)
+    return (best[1], codes[best[1]]) if best else (None, None)
+
+
 def send_ac(dev, s):
-    """Learned code first (100% local); otherwise Tuya's cloud AC command (needs the cloud trial active)."""
+    """Learned code first (100% local); otherwise Tuya's cloud AC command; if the internet is down, the nearest
+    learned code of the same mode."""
     hub = hub_for(dev)
     if not hub:
         raise IHostError("No IR transmitter linked to this AC")
-    code = (dev.get("codes") or {}).get(ac_code_key(s))
+    want = ac_code_key(s)
+    code = (dev.get("codes") or {}).get(want)
     if code:
         ir_link(hub).send(code)
         return "local"
+    cloud_err = None
     if cloud_ready():
         body = {"power": 1 if s["power"] == "on" else 0, "mode": AC_MODES.index(s["mode"]), "temp": int(s["temp"]),
                 "wind": AC_FANS.index(s["fan"])}
-        cloud_call(f"/v2.0/infrareds/{hub['id']}/air-conditioners/{dev['id']}/scenes/command", post=body, action="POST")
-        return "cloud"
-    raise IHostError(f"No learned IR code for '{ac_code_key(s)}' and no Tuya cloud keys to fall back on")
+        try:
+            cloud_call(f"/v2.0/infrareds/{hub['id']}/air-conditioners/{dev['id']}/scenes/command", post=body, action="POST")
+            return "cloud"
+        except Exception as e:
+            cloud_err = e
+            log("AC cloud command failed (no internet?):", e)
+    key, near = nearest_code(dev, s)
+    if near:
+        ir_link(hub).send(near)
+        log(f"AC: no code for '{want}', sent nearest learned '{key}' (offline)")
+        return f"local ({key.replace('_', ' ')}°, nearest learned)"
+    why = f"Tuya cloud failed: {cloud_err}" if cloud_err else "no Tuya cloud keys"
+    raise IHostError(f"No learned IR code for '{want}' and {why}. Learn it on the bridge page to work without internet.")
 
 
 def apply_ac(dev, state):
@@ -1072,7 +1100,55 @@ def poll_hub(hub):
         threading.Thread(target=detect, daemon=True).start()
     for d in CFG["devices"].values():
         if special_kind(d) == "ac" and d.get("ihost_sn") and hub_for(d) is hub:
-            set_online(d, online, "IR transmitter unreachable")
+            # unreachable on the LAN but cloud keys set: the cloud can still drive it, keep the AC usable
+            set_online(d, online or cloud_ready(), "IR transmitter unreachable")
+    if not online:
+        REDISCOVER["want"] = True
+
+
+REDISCOVER = {"want": False, "last": 0, "changes": []}
+REDISCOVER_EVERY = float(os.environ.get("REDISCOVER_SECONDS", "300"))
+
+
+def apply_scan(found):
+    """found: {id: {ip, version}} from tinytuya.deviceScan. Returns list of 'name: old -> new' IP changes."""
+    changes = []
+    for dev_id, info in (found or {}).items():
+        dev = CFG["devices"].get(dev_id)
+        if dev is None:
+            continue
+        ip, ver = info.get("ip"), str(info.get("version") or "") or None
+        if ip and ip != dev.get("ip"):
+            changes.append(f"{dev.get('name')}: {dev.get('ip') or '-'} -> {ip}")
+            dev["ip"] = ip
+            LINKS.pop(dev_id, None)  # reconnect at the new address
+        if ver and ver != dev.get("version"):
+            dev["version"] = ver
+            LINKS.pop(dev_id, None)
+    if changes:
+        save()
+    return changes
+
+
+def rediscover_worker():
+    """A device stopped answering (often: the router gave it a new IP). Listen for Tuya broadcasts and update."""
+    while True:
+        time.sleep(15)
+        if not REDISCOVER["want"] or time.time() - REDISCOVER["last"] < REDISCOVER_EVERY or SCAN.get("state") == "scanning":
+            continue
+        REDISCOVER.update(want=False, last=time.time())
+        try:
+            if FAKE:
+                found = (_read(_fake_store(), {}).get("_scan") or {})
+            else:
+                import tinytuya
+                found = tinytuya.deviceScan(verbose=False, maxretry=None, color=False, poll=False, byID=True)
+            ch = apply_scan(found)
+            REDISCOVER["changes"] = ch
+            if ch:
+                log("device address changed:", "; ".join(ch))
+        except Exception as e:
+            log("re-discovery failed:", e)
 
 
 def poll_one(dev):
@@ -1087,6 +1163,7 @@ def poll_one(dev):
     online = tuya_ok(res)
     set_online(dev, online, (res or {}).get("Error"))
     if not online:
+        REDISCOVER["want"] = True
         return
     dps = dict(dev.get("last_dps") or {})
     dps.update(res.get("dps") or {})
@@ -1678,6 +1755,7 @@ def main():
     threading.Thread(target=poller, daemon=True).start()
     threading.Thread(target=lock_poller, daemon=True).start()
     threading.Thread(target=pulsar_worker, daemon=True).start()
+    threading.Thread(target=rediscover_worker, daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
