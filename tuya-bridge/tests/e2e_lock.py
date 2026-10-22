@@ -90,6 +90,16 @@ try:
           wait(lambda: ihost_dev(sensor)["state"]["contact"]["contact"] is False, 15))
     store_put(lambda s: s["_cloud_devices"][LOCK].update(lock_motor_state=False))
     check("locked again -> sensor 'closed'", wait(lambda: ihost_dev(sensor)["state"]["contact"]["contact"] is True, 15))
+    # unlocked AND re-locked between two checks: only the timestamps show it
+    def _fp(s):
+        s["_cloud_devices"][LOCK]["unlock_fingerprint"] = 2
+        s.setdefault("_cloud_times", {}).setdefault(LOCK, {})["unlock_fingerprint"] = int(time.time() * 1000)
+    store_put(_fp)
+    check("unlock that happened between checks is still caught -> sensor pulses 'open'",
+          wait(lambda: ihost_dev(sensor)["state"]["contact"]["contact"] is False, 15))
+    check("...and returns to 'closed' after the pulse", wait(lambda: ihost_dev(sensor)["state"]["contact"]["contact"] is True, 40))
+    st = next(x for x in http("GET", B + "/api/status")["devices"] if x["id"] == LOCK)
+    check("bridge page shows 'last unlocked ... (fingerprint)'", (st.get("last_unlocked") or {}).get("method") == "fingerprint", st.get("last_unlocked"))
     r = ih("PUT", f"/devices/{sensor}", {"state": {"contact": {"contact": False}}})
     check("the sensor itself can't be commanded", r.get("error") != 0 or ihost_dev(sensor)["state"]["contact"]["contact"] is True, r)
 

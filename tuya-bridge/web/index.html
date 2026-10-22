@@ -96,6 +96,17 @@
     <menu><button value="close">Done</button></menu>
   </form>
 </dialog>
+<dialog id="allowDlg">
+  <form id="allowForm">
+    <h3>Allow unlocking from the iHost?</h3>
+    <p class="warnbox"><b>Danger:</b> this adds a switch that unlocks <b id="aName"></b> with <b>no password</b>.
+      Anyone who can use your iHost, the eWeLink app, CUBE scenes or the iHost API token will be able to open the door.
+      The iHost Home app keeps asking for its own unlock password either way.</p>
+    <label><span>Type <b>UNLOCK</b> to confirm</span> <input id="aWord" autocomplete="off" autocapitalize="characters"></label>
+    <p id="aMsg" class="hint"></p>
+    <menu><button type="button" id="aCancel" class="ghost">Cancel</button><button type="submit" class="dangerbtn">Allow</button></menu>
+  </form>
+</dialog>
 <script src="app.js"></script>
 </body>
 </html>

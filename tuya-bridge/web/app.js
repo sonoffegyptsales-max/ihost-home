@@ -74,7 +74,13 @@ function renderDevices() {
     if (sp === "lock") {
       const ago = d.checked ? `${Math.max(0, Math.round((Date.now() / 1000 - d.checked) / 60))} min ago` : "never";
       const lu = d.last_unlock ? ` · last iHost unlock: ${new Date(d.last_unlock.at * 1000).toLocaleString()} ${d.last_unlock.ok ? "✓" : "✗ " + esc(d.last_unlock.error || "")}` : "";
-      extra = `<div class="meta">Checked ${esc(ago)} (every ${esc(d.poll_minutes)} min, Tuya cloud)${d.lock_error ? ` · <span class="errtxt">${esc(d.lock_error)}</span>` : ""}${lu}</div>
+      const rt = d.realtime || {};
+      const rtText = rt.state === "connected" ? '<b class="oktxt">real-time (instant)</b>'
+        : rt.state === "unavailable" ? `<span class="errtxt" title="${esc(rt.error || "")}">real-time not allowed by Tuya – subscribe "Message Service"</span>`
+        : rt.state === "error" ? `<span class="errtxt" title="${esc(rt.error || "")}">real-time reconnecting</span>` : "real-time starting…";
+      const lastOpen = d.last_unlocked ? `Last unlocked: <b>${esc(new Date(d.last_unlocked.at * 1000).toLocaleString())}</b> (${esc(d.last_unlocked.method)})` : "No unlock seen yet";
+      extra = `<div class="meta">${lastOpen}</div>
+        <div class="meta">Updates: ${rtText} · checked ${esc(ago)} (every ${esc(d.poll_minutes)} min without real-time)${d.lock_error ? ` · <span class="errtxt">${esc(d.lock_error)}</span>` : ""}${lu}</div>
         <div class="meta lockrow">${d.unlock_enabled
           ? `Unlock from the iHost: <b>allowed</b> · ${d.unlock_in_ihost ? '<button class="danger" data-act="remove-unlock">Remove unlock switch</button>' : '<button data-act="add-unlock">Add unlock switch to iHost</button>'}
              <button class="ghost" data-act="disallow-unlock">Disallow</button>`
@@ -155,10 +161,12 @@ $("#devices").addEventListener("click", async (e) => {
       if (!r.ok) msg(out, `✗ ${d.name}: device didn't answer`, "err"); }
     if (act === "codes") { codesFor = id; renderCodes(); $("#codesDlg").showModal(); }
     if (act === "allow-unlock") {
-      const typed = prompt(`DANGER: this lets the iHost unlock "${d.name}" with NO password.\n\n` +
-        "Anyone who can use your iHost, the eWeLink app, CUBE scenes, or the iHost API token will be able to open the door.\n" +
-        "The iHost Home app keeps asking for its unlock password either way.\n\nType UNLOCK to allow it:");
-      if (typed !== null) { await api("POST", `/api/devices/${encodeURIComponent(id)}/unlock-enable`, { enabled: true, confirm: typed }); msg(out, "Unlock from the iHost allowed – now add the unlock switch.", "ok"); }
+      allowFor = id;
+      $("#aName").textContent = d.name;
+      $("#aWord").value = "";
+      msg($("#aMsg"), "");
+      $("#allowDlg").showModal();
+      setTimeout(() => $("#aWord").focus(), 50);
     }
     if (act === "disallow-unlock") { await api("POST", `/api/devices/${encodeURIComponent(id)}/unlock-enable`, { enabled: false }); msg(out, "Unlock from the iHost turned off (switch removed)."); }
     if (act === "add-unlock") { await api("POST", `/api/devices/${encodeURIComponent(id)}/add-unlock`); msg(out, `"${d.name} Unlock" switch added to the iHost`, "ok"); }
@@ -204,3 +212,18 @@ $("#jsonForm").addEventListener("submit", async (e) => {
 });
 $("#scanBtn").addEventListener("click", async () => { try { await api("POST", "/api/scan"); } catch (e) { msg($("#scanMsg"), e.message, "err"); } refresh(); });
 refresh();
+
+// ---- "Allow unlock from the iHost" dialog (prompt() is blocked in many in-app browsers)
+let allowFor = null;
+$("#allowForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const word = $("#aWord").value.trim();
+  if (word.toUpperCase() !== "UNLOCK") { msg($("#aMsg"), "Type the word UNLOCK to confirm.", "err"); return; }
+  try {
+    await api("POST", `/api/devices/${encodeURIComponent(allowFor)}/unlock-enable`, { enabled: true, confirm: word });
+    $("#allowDlg").close();
+    msg($("#scanMsg"), "Unlock from the iHost allowed – now press “Add unlock switch to iHost”.", "ok");
+  } catch (err) { msg($("#aMsg"), err.message, "err"); }
+  refresh();
+});
+$("#aCancel").addEventListener("click", () => $("#allowDlg").close());

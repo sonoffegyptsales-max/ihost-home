@@ -306,22 +306,91 @@ def lock_switch_endpoint(dev):
     }
 
 
-def refresh_lock(dev):
-    """One cloud call: status of the lock. Reports changes to the iHost sensor."""
-    res = cloud_call(f"/v1.0/devices/{dev['id']}", action="GET")
-    st = {s.get("code"): s.get("value") for s in (res or {}).get("status") or []} if isinstance(res, dict) else {}
+UNLOCK_CODE_NAMES = {"unlock_fingerprint": "fingerprint", "unlock_password": "password", "unlock_card": "card",
+                     "unlock_face": "face", "unlock_key": "key", "unlock_app": "app", "unlock_phone_remote": "phone (remote)",
+                     "unlock_voice_remote": "voice", "unlock_temporary": "temporary password", "unlock_dynamic": "dynamic password",
+                     "unlock_ble": "Bluetooth", "unlock_double_kit": "double verification", "unlock_remote": "remote",
+                     "open_inside": "from inside"}
+PULSE_SECONDS = 20  # how long the iHost sensor shows "unlocked" for an unlock that was caught after the lock re-locked
+
+
+def lock_event(dev, at_ms, method):
+    """An unlock happened (seen in real time or caught afterwards from the property timestamps)."""
+    if at_ms <= (dev.get("lock_last_event") or 0):
+        return
+    first = dev.get("lock_last_event") is None
+    dev["lock_last_event"] = at_ms
+    if first:  # first look after start-up: just remember where we are, don't replay old unlocks
+        return
+    dev["last_unlocked"] = {"at": at_ms / 1000, "method": method}
+    log("lock event: unlocked by", method, "-", dev.get("name"))
+    if time.time() - at_ms / 1000 > 900:  # older than 15 min (bridge was down): record it, don't fire scenes now
+        return
+    if dev.get("ihost_sn"):
+        state = lock_sensor_state(dev)
+        state["contact"] = {"contact": False}
+        report_state(dev, state)
+        dev["_reported"] = json.dumps(state, sort_keys=True)
+        dev["_pulse_until"] = time.time() + PULSE_SECONDS
+
+        def back():
+            time.sleep(PULSE_SECONDS)
+            cur = lock_sensor_state(dev)
+            if cur["contact"]["contact"]:  # it re-locked: show locked again
+                report_state(dev, cur)
+                dev["_reported"] = json.dumps(cur, sort_keys=True)
+        threading.Thread(target=back, daemon=True).start()
+
+
+def apply_lock_properties(dev, props):
+    """props: [{code, value, time(ms)}]. Updates status, detects unlocks, reports to the iHost."""
+    st = dict(dev.get("lock_status") or {})
+    newest, method = 0, None
+    for p in props:
+        code = p.get("code")
+        if code is None:
+            continue
+        st[code] = p.get("value")
+        t = int(p.get("time") or p.get("t") or 0)
+        if code in UNLOCK_CODE_NAMES and t and (code != "open_inside" or p.get("value")) and t > newest:
+            newest, method = t, UNLOCK_CODE_NAMES[code]
+        if code == "lock_motor_state" and p.get("value") is True and t > newest:
+            newest, method = t, method or "unknown"
     dev["lock_status"] = st
-    dev["lock_cloud_online"] = bool((res or {}).get("online")) if isinstance(res, dict) else None
+    if newest:
+        lock_event(dev, newest, method or "unknown")
+    elif dev.get("lock_last_event") is None:
+        dev["lock_last_event"] = 0
+    if dev.get("ihost_sn"):
+        state = lock_sensor_state(dev)
+        sig = json.dumps(state, sort_keys=True)
+        if sig != dev.get("_reported") and not (time.time() < (dev.get("_pulse_until") or 0) and state["contact"]["contact"]):
+            dev["_reported"] = sig
+            report_state(dev, state)
+    return st
+
+
+def refresh_lock(dev):
+    """One cloud call: the lock's properties WITH timestamps (so unlocks between checks are still noticed)."""
+    props = None
+    if not dev.get("_no_shadow"):
+        try:
+            res = cloud_call(f"/v2.0/cloud/thing/{dev['id']}/shadow/properties", action="GET")
+            props = (res or {}).get("properties") if isinstance(res, dict) else None
+        except CloudError as e:
+            if "permission" in str(e).lower() or "not support" in str(e).lower() or "1106" in str(e) or "uri path invalid" in str(e).lower():
+                dev["_no_shadow"] = True  # fall back to the plain status API from now on
+            else:
+                raise
+    if props is None:
+        res = cloud_call(f"/v1.0/devices/{dev['id']}", action="GET")
+        props = [{"code": s.get("code"), "value": s.get("value")} for s in (res or {}).get("status") or []] if isinstance(res, dict) else []
     dev["lock_checked"] = time.time()
     dev["_lock_fail"] = 0
     if dev.get("ihost_sn"):
         set_online(dev, True)
-        state = lock_sensor_state(dev)
-        sig = json.dumps(state, sort_keys=True)
-        if sig != dev.get("_reported"):
-            dev["_reported"] = sig
-            report_state(dev, state)
-    return st
+    return apply_lock_properties(dev, props)
+
 
 
 UNLOCKS = []  # timestamps of unlocks via the iHost switch
@@ -681,6 +750,12 @@ def cloud_call(url, post=None, action=None, _retry=True):
         if allst.get("_cloud_down"):
             raise CloudError("Tuya cloud: simulated outage")
         parts = url.strip("/").split("/")
+        if url.endswith("/shadow/properties"):
+            dev = (allst.get("_cloud_devices") or {}).get(parts[3])
+            if dev is None:
+                raise CloudError("Tuya cloud: device not found (code 2001)")
+            times = (allst.get("_cloud_times") or {}).get(parts[3]) or {}
+            return {"properties": [{"code": k, "value": v, "time": times.get(k, 1)} for k, v in dev.items()]}
         if (action or "GET") == "GET" and len(parts) == 3 and parts[1] == "devices":
             dev = (allst.get("_cloud_devices") or {}).get(parts[2])
             if dev is None:
@@ -1052,7 +1127,9 @@ def lock_poller():
     plan's monthly call quota. 3 failures in a row mark the sensor offline in the iHost."""
     while True:
         for dev in [d for d in CFG["devices"].values() if special_kind(d) == "lock" and d.get("ihost_sn")]:
-            due = time.time() - (dev.get("lock_checked") or 0) >= LOCK_POLL_SECONDS
+            # with real-time messages flowing, a slow safety check every 30 min is enough
+            interval = 1800 if PULSAR["state"] == "connected" else LOCK_POLL_SECONDS
+            due = time.time() - (dev.get("lock_checked") or 0) >= interval
             if not due or not CFG["ihost"]["token"]:
                 continue
             try:
@@ -1067,6 +1144,110 @@ def lock_poller():
             else:
                 dev["lock_error"] = None
         time.sleep(5)
+
+
+# ------------------------------------------------------------------ Tuya real-time messages (Pulsar), optional
+# Protocol as in Tuya's official tuya-connector-python (openpulsar.py). Needs "Message Service" subscribed in the
+# Tuya cloud project. If Tuya refuses (401), the bridge keeps polling and retries every 30 minutes.
+MQ_HOSTS = {"eu": "wss://mqe.tuyaeu.com:8285/", "weu": "wss://mqe.tuyaeu.com:8285/", "us": "wss://mqe.tuyaus.com:8285/",
+            "ueaz": "wss://mqe.tuyaus.com:8285/", "cn": "wss://mqe.tuyacn.com:8285/", "in": "wss://mqe.tuyain.com:8285/"}
+PULSAR = {"state": "off", "error": None, "messages": 0, "last": None}
+
+
+def _md5(s):
+    return hashlib.md5(s.encode("utf-8")).hexdigest()
+
+
+def pulsar_decrypt(data, access_key, mode=None):
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    raw = __import__("base64").b64decode(data)
+    key = access_key[8:24].encode("utf-8")
+    if mode == "aes_gcm":
+        return AESGCM(key).decrypt(raw[:12], raw[12:], None).decode("utf-8")
+    dec = Cipher(algorithms.AES(key), modes.ECB()).decryptor()
+    out = (dec.update(raw) + dec.finalize()).decode("utf-8", "ignore")
+    return __import__("re").sub(r"[^\x20-\x7E]", "", out)
+
+
+def pulsar_handle(event):
+    """event: decrypted Tuya message (old {devId,status:[...]} or new {bizCode,bizData:{devId,properties:[...]}})."""
+    biz = event.get("bizData") if isinstance(event.get("bizData"), dict) else {}
+    dev_id = event.get("devId") or biz.get("devId")
+    props = event.get("status") or biz.get("properties") or biz.get("status") or []
+    dev = CFG["devices"].get(dev_id or "")
+    if not dev or special_kind(dev) != "lock" or not isinstance(props, list):
+        return False
+    norm = [{"code": p.get("code"), "value": p.get("value"), "time": p.get("time") or p.get("t") or int(time.time() * 1000)}
+            for p in props if isinstance(p, dict)]
+    norm = [p for p in norm if p["code"]]
+    # Tuya sometimes sends seconds instead of ms
+    for p in norm:
+        if p["time"] and p["time"] < 1e12:
+            p["time"] = int(p["time"] * 1000)
+    if norm:
+        apply_lock_properties(dev, norm)
+        dev["lock_checked"] = time.time()
+        save()
+    return True
+
+
+def pulsar_worker():
+    while True:
+        t = CFG["tuya"]
+        locks = [d for d in CFG["devices"].values() if special_kind(d) == "lock" and d.get("ihost_sn")]
+        if FAKE or not cloud_ready() or not locks or os.environ.get("TUYA_REALTIME") == "0":
+            PULSAR.update(state="off", error=None)
+            time.sleep(30)
+            continue
+        host = MQ_HOSTS.get(t["region"])
+        if not host:
+            PULSAR.update(state="unavailable", error=f"no real-time server known for region '{t['region']}'")
+            time.sleep(1800)
+            continue
+        aid, key = t["api_key"], t["api_secret"]
+        url = f"{host}ws/v2/consumer/persistent/{aid}/out/event/{aid}-sub?ackTimeoutMillis=3000&subscriptionType=Failover"
+        try:
+            import websocket
+            PULSAR.update(state="connecting", error=None)
+            ws = websocket.create_connection(url, header=[f"username: {aid}", f"password: {_md5(aid + _md5(key))[8:24]}"], timeout=30)
+            PULSAR.update(state="connected", error=None)
+            log("Tuya real-time messages connected")
+            last_ping = time.time()
+            while True:
+                try:
+                    raw = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    ws.ping()
+                    last_ping = time.time()
+                    continue
+                if not raw:
+                    raise ConnectionError("closed by Tuya")
+                msg = json.loads(raw)
+                if msg.get("messageId"):
+                    ws.send(json.dumps({"messageId": msg["messageId"]}))  # ack
+                try:
+                    payload = json.loads(__import__("base64").b64decode(msg.get("payload") or "").decode("utf-8"))
+                    data = payload.get("data")
+                    event = json.loads(pulsar_decrypt(data, key, payload.get("em"))) if isinstance(data, str) else (data or {})
+                    PULSAR["messages"] += 1
+                    PULSAR["last"] = time.time()
+                    pulsar_handle(event)
+                except Exception as e:
+                    log("real-time message not understood:", e)
+                if time.time() - last_ping > 25:
+                    ws.ping()
+                    last_ping = time.time()
+        except Exception as e:
+            status = getattr(e, "status_code", None)
+            if status in (401, 403):
+                PULSAR.update(state="unavailable", error="Tuya refused real-time messages: subscribe 'Message Service' in your Tuya cloud project (Service API). Using 5-minute checks meanwhile.")
+                log("real-time messages refused (HTTP", status, ") - polling instead")
+                time.sleep(1800)
+            else:
+                PULSAR.update(state="error", error=str(e)[:200])
+                log("real-time messages:", e)
+                time.sleep(60)
 
 
 def _safe(fn, *a):
@@ -1189,7 +1370,8 @@ def public_device(d):
         out.update(locked=lock_locked(st) if st else None, battery=st.get("residual_electricity"),
                    checked=d.get("lock_checked"), lock_error=d.get("lock_error"), cloud=cloud_ready(),
                    unlock_enabled=bool(d.get("unlock_enabled")), unlock_in_ihost=bool(d.get("unlock_sn")),
-                   last_unlock=lu or None, poll_minutes=round(LOCK_POLL_SECONDS / 60, 1))
+                   last_unlock=lu or None, poll_minutes=round(LOCK_POLL_SECONDS / 60, 1),
+                   last_unlocked=d.get("last_unlocked"), realtime=PULSAR)
     if special == "ac":
         hub = hub_for(d)
         out.update(ac=ac_state(d), codes=sorted((d.get("codes") or {}).keys()), hub=hub and {"id": hub["id"], "name": hub.get("name")},
@@ -1495,6 +1677,7 @@ def main():
     threading.Thread(target=resync_all, daemon=True).start()
     threading.Thread(target=poller, daemon=True).start()
     threading.Thread(target=lock_poller, daemon=True).start()
+    threading.Thread(target=pulsar_worker, daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

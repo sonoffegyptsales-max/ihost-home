@@ -47,3 +47,7 @@ dialog::backdrop { background:rgba(0,0,0,.5); }
 .errtxt { color:var(--bad); }
 .lockrow { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-top:4px; }
 .lockrow button { padding:4px 10px; font-size:12px; }
+.oktxt { color:var(--ok); }
+.warnbox { background:rgba(229,83,75,.12); border:1px solid var(--bad); border-radius:8px; padding:10px; font-size:13px; margin:0; }
+button.dangerbtn { background:var(--bad); color:#fff; }
+#allowDlg { width:min(460px,94vw); }

@@ -81,6 +81,12 @@ off does nothing (Wi-Fi locks can't be locked remotely). Limited to 3 unlocks pe
 iHost API token can open the door. "Disallow" removes the switch immediately. iHost Home never shows this switch and refuses
 to flip it: the app keeps its own password-protected **Unlock Door** (see the main README).
 
-`tests/e2e_lock.py <ihost-url> <token>`: 23 checks against a real iHost with a simulated Tuya cloud.
+`tests/e2e_lock.py <ihost-url> <token>`: 26 checks against a real iHost with a simulated Tuya cloud.
+
+**How fast does the sensor update?** With Tuya **Message Service** subscribed in your Tuya cloud project (Service API →
+Message Service, free trial), the bridge receives lock events in **real time** (a few seconds) and only checks every 30 min as a
+safety net. Without it, it checks every 5 min. Each check reads the property *timestamps*, so an unlock that happened and
+re-locked between two checks is still caught: the sensor shows "open" for 20 s and the page shows "Last unlocked … (fingerprint)".
+Set `TUYA_REALTIME=0` to turn real-time off.
 
 `tests/e2e_ac.py <ihost-url> <token>`: 20 checks for the AC path against a real iHost, using a simulated IR transmitter and cloud.
