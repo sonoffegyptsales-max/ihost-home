@@ -58,14 +58,29 @@ function renderDevices() {
     if (sp === "ac" && !d.hub) problems.push('<span class="pill bad">pick IR transmitter (Edit)</span>');
     if (sp === "ac" && d.last_error) problems.push(`<span class="pill bad" title="${esc(d.last_error)}">last command failed</span>`);
     let live = "";
-    if (sp === "ir_hub" && d.online != null) live = d.online ? '<span class="pill on">online</span>' : '<span class="pill bad">offline</span>';
+    if (sp === "lock") {
+      const lk = d.locked === true ? '<span class="pill on">locked</span>' : d.locked === false ? '<span class="pill warn">UNLOCKED</span>' : "";
+      live = `${lk}${d.battery != null ? ` <span class="pill">battery ${esc(d.battery)}%</span>` : ""}${d.in_ihost && d.online === false ? ' <span class="pill bad">cloud unreachable</span>' : ""}`;
+      if (d.unlock_in_ihost) live += ' <span class="pill bad">unlock switch in iHost</span>';
+    }
+    else if (sp === "ir_hub" && d.online != null) live = d.online ? '<span class="pill on">online</span>' : '<span class="pill bad">offline</span>';
     else if (d.in_ihost) live = d.online === false ? '<span class="pill bad">offline</span>'
       : `<span class="pill ${(sp === "ac" ? d.ac && d.ac.power === "on" : d.state && d.state.power && d.state.power.powerState === "on") ? "on" : "off"}">${esc(stateText(d)) || "…"}</span>`;
     const kindName = { ac: "IR air conditioner", ir_hub: "IR transmitter", lock: "door lock", ir_other: "IR remote" }[sp] || d.kind;
     const kind = `${kindName}${d.channels > 1 ? ` · ${d.channels} gangs` : ""}${d.dimmable ? " · dimmable" : ""}`;
-    const can = sp === "ac" ? !!d.hub : (d.has_key && (d.ip || S.fake));
-    const testable = sp === "lock" ? false : can;
+    const can = sp === "ac" ? !!d.hub : sp === "lock" ? !!d.cloud : (d.has_key && (d.ip || S.fake));
+    const testable = can;
     let extra = "";
+    if (sp === "lock") {
+      const ago = d.checked ? `${Math.max(0, Math.round((Date.now() / 1000 - d.checked) / 60))} min ago` : "never";
+      const lu = d.last_unlock ? ` · last iHost unlock: ${new Date(d.last_unlock.at * 1000).toLocaleString()} ${d.last_unlock.ok ? "✓" : "✗ " + esc(d.last_unlock.error || "")}` : "";
+      extra = `<div class="meta">Checked ${esc(ago)} (every ${esc(d.poll_minutes)} min, Tuya cloud)${d.lock_error ? ` · <span class="errtxt">${esc(d.lock_error)}</span>` : ""}${lu}</div>
+        <div class="meta lockrow">${d.unlock_enabled
+          ? `Unlock from the iHost: <b>allowed</b> · ${d.unlock_in_ihost ? '<button class="danger" data-act="remove-unlock">Remove unlock switch</button>' : '<button data-act="add-unlock">Add unlock switch to iHost</button>'}
+             <button class="ghost" data-act="disallow-unlock">Disallow</button>`
+          : `Unlock from the iHost: off · <button class="ghost" data-act="allow-unlock" ${d.cloud ? "" : "disabled"}>Allow…</button>`}</div>`;
+      if (!d.cloud) extra += '<div class="meta note">Enter the Tuya cloud keys in step 2 first.</div>';
+    }
     if (sp === "ac") {
       extra = `<div class="meta">IR transmitter: ${esc(d.hub ? d.hub.name : "—")} · learned codes: ${d.codes.length ? esc(d.codes.join(", ")) : "none"}
         · fallback: ${d.cloud ? "Tuya cloud" : "none (learn codes)"}${d.via ? ` · last sent: ${esc(d.via)}` : ""}</div>`;
@@ -76,9 +91,9 @@ function renderDevices() {
         <div class="meta">${esc(kind)} · ${esc(d.product || d.category || "")} · ${esc(d.ip || "no IP")} · v${esc(d.version || "?")} · <code>${esc(d.id)}</code></div>${extra}</div>
       <div class="acts">
         ${sp === "ac" ? '<button class="ghost" data-act="codes">IR codes</button>' : ""}
-        ${d.in_ihost ? `${sp === "ir_hub" ? "" : '<button class="ghost" data-act="toggle">Toggle</button>'}<button class="danger" data-act="remove">Remove from iHost</button>`
-                     : (d.addable ? `<button data-act="add" ${can && S.ihost.paired ? "" : "disabled"}>Add to iHost</button>` : "")}
-        ${testable ? '<button class="ghost" data-act="test">Test</button>' : ""}
+        ${d.in_ihost ? `${sp === "ir_hub" || sp === "lock" ? "" : '<button class="ghost" data-act="toggle">Toggle</button>'}<button class="danger" data-act="remove">Remove from iHost</button>`
+                     : (d.addable ? `<button data-act="add" ${can && S.ihost.paired ? "" : "disabled"}>${sp === "lock" ? "Add status sensor to iHost" : "Add to iHost"}</button>` : "")}
+        ${testable ? `<button class="ghost" data-act="test">${sp === "lock" ? "Check now" : "Test"}</button>` : ""}
         <button class="ghost" data-act="edit">Edit</button>
         ${d.in_ihost ? "" : '<button class="danger" data-act="delete">Forget</button>'}
       </div></div>`;
@@ -139,6 +154,15 @@ $("#devices").addEventListener("click", async (e) => {
     if (act === "toggle") { const r = await api("POST", `/api/devices/${encodeURIComponent(id)}/set`, { state: { power: { powerState: "toggle" } } });
       if (!r.ok) msg(out, `✗ ${d.name}: device didn't answer`, "err"); }
     if (act === "codes") { codesFor = id; renderCodes(); $("#codesDlg").showModal(); }
+    if (act === "allow-unlock") {
+      const typed = prompt(`DANGER: this lets the iHost unlock "${d.name}" with NO password.\n\n` +
+        "Anyone who can use your iHost, the eWeLink app, CUBE scenes, or the iHost API token will be able to open the door.\n" +
+        "The iHost Home app keeps asking for its unlock password either way.\n\nType UNLOCK to allow it:");
+      if (typed !== null) { await api("POST", `/api/devices/${encodeURIComponent(id)}/unlock-enable`, { enabled: true, confirm: typed }); msg(out, "Unlock from the iHost allowed – now add the unlock switch.", "ok"); }
+    }
+    if (act === "disallow-unlock") { await api("POST", `/api/devices/${encodeURIComponent(id)}/unlock-enable`, { enabled: false }); msg(out, "Unlock from the iHost turned off (switch removed)."); }
+    if (act === "add-unlock") { await api("POST", `/api/devices/${encodeURIComponent(id)}/add-unlock`); msg(out, `"${d.name} Unlock" switch added to the iHost`, "ok"); }
+    if (act === "remove-unlock" && confirm("Remove the unlock switch from the iHost?")) { await api("POST", `/api/devices/${encodeURIComponent(id)}/remove-unlock`); msg(out, "Unlock switch removed"); }
     if (act === "edit") {
       editing = d; $("#eName").value = d.name || ""; $("#eIp").value = d.ip || ""; $("#eVer").value = d.version || "3.3"; $("#eDps").value = "";
       const hubs = S.devices.filter((x) => x.special === "ir_hub");

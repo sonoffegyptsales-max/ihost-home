@@ -254,6 +254,133 @@ def ac_state(dev):
     return dict(AC_DEFAULT, **(dev.get("ac") or {}))
 
 
+# ---- door locks (Tuya cloud only): status sensor + optional momentary "unlock" switch
+LOCK_POLL_SECONDS = float(os.environ.get("LOCK_POLL_SECONDS") or 300)  # free cloud plan: ~26k calls/month
+UNLOCK_LIMIT = (3, 600)  # max unlocks per 10 minutes through the iHost switch
+
+
+def lock_locked(status):
+    """True = locked, False = unlocked, None = unknown. Tuya: lock_motor_state true = unlocked."""
+    if isinstance(status.get("lock_motor_state"), bool):
+        return not status["lock_motor_state"]
+    if status.get("closed_opened") in ("open", "closed"):
+        return status["closed_opened"] == "closed"
+    if isinstance(status.get("door_opened"), bool):
+        return not status["door_opened"]
+    return None
+
+
+def lock_sensor_state(dev):
+    st = dev.get("lock_status") or {}
+    locked = lock_locked(st)
+    out = {"contact": {"contact": True if locked is None else locked}}
+    batt = st.get("residual_electricity")
+    if isinstance(batt, (int, float)):
+        out["battery"] = {"battery": int(batt)}
+    return out
+
+
+def lock_sensor_endpoint(dev):
+    return {
+        "third_serial_number": "tuya_" + dev["id"],
+        "name": dev.get("name") or "Door Lock",
+        "display_category": "contactSensor",
+        "capabilities": [{"capability": "contact", "permission": "0100"}, {"capability": "battery", "permission": "0100"}],
+        "state": lock_sensor_state(dev),
+        "tags": {"source": "tuya-bridge", "tuya_category": dev.get("category") or "lock", "lock": "status"},
+        "manufacturer": "Tuya", "model": (dev.get("product_name") or "Smart Lock")[:60], "firmware_version": "",
+        "service_address": service_address(),
+    }
+
+
+def lock_switch_endpoint(dev):
+    return {
+        "third_serial_number": "tuya_" + dev["id"] + "_unlock",
+        "name": (dev.get("name") or "Door Lock") + " Unlock",
+        "display_category": "switch",
+        "capabilities": [{"capability": "power", "permission": "1100"}],
+        "state": {"power": {"powerState": "off"}},
+        "tags": {"source": "tuya-bridge", "lock": "unlock-switch", "ihh_confirm": "unlock"},
+        "manufacturer": "Tuya", "model": "Remote unlock (momentary)", "firmware_version": "",
+        "service_address": service_address(),
+    }
+
+
+def refresh_lock(dev):
+    """One cloud call: status of the lock. Reports changes to the iHost sensor."""
+    res = cloud_call(f"/v1.0/devices/{dev['id']}", action="GET")
+    st = {s.get("code"): s.get("value") for s in (res or {}).get("status") or []} if isinstance(res, dict) else {}
+    dev["lock_status"] = st
+    dev["lock_cloud_online"] = bool((res or {}).get("online")) if isinstance(res, dict) else None
+    dev["lock_checked"] = time.time()
+    dev["_lock_fail"] = 0
+    if dev.get("ihost_sn"):
+        set_online(dev, True)
+        state = lock_sensor_state(dev)
+        sig = json.dumps(state, sort_keys=True)
+        if sig != dev.get("_reported"):
+            dev["_reported"] = sig
+            report_state(dev, state)
+    return st
+
+
+UNLOCKS = []  # timestamps of unlocks via the iHost switch
+
+
+def unlock_via_cloud(dev):
+    try:
+        t = cloud_call(f"/v1.0/devices/{dev['id']}/door-lock/password-ticket", action="POST")
+        cloud_call(f"/v1.0/devices/{dev['id']}/door-lock/password-free/open-door", post={"ticket_id": (t or {}).get("ticket_id")}, action="POST")
+    except CloudError as e:
+        t = cloud_call(f"/v1.0/smart-lock/devices/{dev['id']}/password-ticket", action="POST")
+        try:
+            cloud_call(f"/v1.0/smart-lock/devices/{dev['id']}/password-free/door-operate",
+                       post={"ticket_id": (t or {}).get("ticket_id"), "open": True}, action="POST")
+        except CloudError as e2:
+            raise CloudError(f"{e}; {e2}")
+
+
+def report_switch_off(dev):
+    if dev.get("unlock_sn"):
+        try:
+            ihost_event("DeviceStatesChangeReport", {"state": {"power": {"powerState": "off"}}},
+                        {"serial_number": dev["unlock_sn"], "third_serial_number": "tuya_" + dev["id"] + "_unlock"})
+        except IHostError as e:
+            log("unlock switch reset failed:", e)
+
+
+def unlock_worker(dev):
+    try:
+        unlock_via_cloud(dev)
+        dev["last_unlock"] = {"at": time.time(), "ok": True, "error": None}
+        log("UNLOCKED via iHost switch:", dev.get("name"))
+    except Exception as e:
+        dev["last_unlock"] = {"at": time.time(), "ok": False, "error": str(e)}
+        log("UNLOCK FAILED via iHost switch:", dev.get("name"), e)
+    save()
+    time.sleep(2)
+    report_switch_off(dev)  # momentary: the switch always falls back to off
+    time.sleep(4)
+    _safe(refresh_lock, dev)
+
+
+def apply_unlock_switch(dev, state):
+    ps = (state.get("power") or {}).get("powerState")
+    if ps != "on" and ps != "toggle":
+        return True, {"power": {"powerState": "off"}}  # "off" does nothing (it can't lock)
+    if not dev.get("unlock_enabled"):
+        log("unlock refused (switch disabled on the bridge page):", dev.get("name"))
+        return False, "INVALID_DIRECTIVE"
+    now = time.time()
+    UNLOCKS[:] = [t for t in UNLOCKS if now - t < UNLOCK_LIMIT[1]]
+    if len(UNLOCKS) >= UNLOCK_LIMIT[0]:
+        log("unlock refused (rate limit):", dev.get("name"))
+        return False, "INVALID_DIRECTIVE"
+    UNLOCKS.append(now)
+    threading.Thread(target=unlock_worker, args=(dev,), daemon=True).start()  # the iHost wants an answer within 3 s
+    return True, {"power": {"powerState": "on"}}
+
+
 def ac_ihost_state(s):
     return {"power": {"powerState": s["power"]},
             "mode": {"airConditionerMode": {"modeValue": s["mode"]}, "fanLevel": {"modeValue": s["fan"]}},
@@ -288,6 +415,8 @@ def endpoint_for(dev):
     d = describe(dev)
     if d["special"] == "ac":
         return ac_endpoint(dev)
+    if d["special"] == "lock":
+        return lock_sensor_endpoint(dev)
     caps, state = [{"capability": "power", "permission": "1100"}], {}
     st = dev.get("last_dps") or {}
     if d["channels"]:
@@ -543,13 +672,30 @@ def cloud_call(url, post=None, action=None, _retry=True):
     if not cloud_ready():
         raise CloudError("Tuya cloud keys not set (step 2 on this page)")
     if FAKE:
-        def f(allst):
-            allst.setdefault("_cloud", []).append({"url": url, "post": post})
+        # simulated cloud: calls are recorded; lock status comes from fake_tuya.json["_cloud_devices"][id]
         with lock:
             allst = _read(_fake_store(), {})
-            f(allst)
+            allst.setdefault("_cloud", []).append({"url": url, "post": post, "action": action})
             with open(_fake_store(), "w", encoding="utf-8") as fh:
                 json.dump(allst, fh)
+        if allst.get("_cloud_down"):
+            raise CloudError("Tuya cloud: simulated outage")
+        parts = url.strip("/").split("/")
+        if (action or "GET") == "GET" and len(parts) == 3 and parts[1] == "devices":
+            dev = (allst.get("_cloud_devices") or {}).get(parts[2])
+            if dev is None:
+                raise CloudError("Tuya cloud: device not found (code 2001)")
+            return {"id": parts[2], "online": True, "status": [{"code": k, "value": v} for k, v in dev.items()]}
+        if url.endswith("password-ticket"):
+            return {"ticket_id": "fake-ticket"}
+        if url.endswith("open-door") or url.endswith("door-operate"):
+            with lock:
+                allst = _read(_fake_store(), {})
+                lk = (allst.get("_cloud_devices") or {}).get(url.split("/")[3])
+                if lk is not None:
+                    lk["lock_motor_state"] = True  # Tuya: true = unlocked
+                with open(_fake_store(), "w", encoding="utf-8") as fh:
+                    json.dump(allst, fh)
         return True
     sig = (t["region"], t["api_key"], t["api_secret"])
     if _cloud["obj"] is None or _cloud["sig"] != sig:
@@ -580,13 +726,19 @@ def ihost_devices():
 def add_to_ihost(dev_id):
     dev = CFG["devices"][dev_id]
     special = special_kind(dev)
-    if special == "lock":
-        raise IHostError("Door locks can't be controlled locally - they are shown in the iHost Home app (cloud).")
     if special == "ir_hub":
         raise IHostError("The IR transmitter itself has nothing to switch - add the remotes that use it (e.g. the AC).")
     if special == "ir_other":
         raise IHostError("Only IR air conditioners are supported so far.")
-    if special == "ac":
+    if special == "lock":
+        if not cloud_ready():
+            raise IHostError("Door locks are read through the Tuya cloud - enter the cloud keys in step 2 first.")
+        try:
+            refresh_lock(dev)
+            ok = True
+        except Exception as e:
+            raise IHostError(f"Couldn't read the lock from the Tuya cloud: {e}")
+    elif special == "ac":
         hub = hub_for(dev)
         if not hub:
             raise IHostError("Pick which IR transmitter this AC uses (Edit), then try again.")
@@ -624,8 +776,44 @@ def remove_from_ihost(dev_id):
             ihost("DELETE", "/devices/" + urllib.parse.quote(sn))
         except IHostError as e:
             log("remove failed:", e)
-    dev.update(ihost_sn=None, enabled=False)
+    dev.update(ihost_sn=None, enabled=False, _reported=None, _online_reported=None)
     save()
+
+
+def add_unlock_switch(dev_id):
+    """Option 2: a momentary 'Unlock' switch in the iHost. Only after it was explicitly enabled on the bridge page."""
+    dev = CFG["devices"][dev_id]
+    if special_kind(dev) != "lock":
+        raise IHostError("Only door locks have an unlock switch")
+    if not dev.get("unlock_enabled"):
+        raise IHostError("Turn on 'Allow unlock from the iHost' for this lock first")
+    if not cloud_ready():
+        raise IHostError("Tuya cloud keys missing (step 2)")
+    tsn = "tuya_" + dev_id + "_unlock"
+    res = ihost_event("DiscoveryRequest", {"endpoints": [lock_switch_endpoint(dev)]})
+    eps = (res.get("payload") or {}).get("endpoints") or []
+    sn = next((e.get("serial_number") for e in eps if e.get("third_serial_number") == tsn), None) or \
+        next((d["serial_number"] for d in ihost_devices() if d.get("third_serial_number") == tsn), None)
+    if not sn:
+        raise IHostError("The iHost didn't return a serial number for the unlock switch")
+    dev["unlock_sn"] = sn
+    save()
+    report_switch_off(dev)
+    log("UNLOCK SWITCH added to iHost:", dev.get("name"), sn)
+    return sn
+
+
+def remove_unlock_switch(dev_id):
+    dev = CFG["devices"][dev_id]
+    sn = dev.get("unlock_sn")
+    if sn:
+        try:
+            ihost("DELETE", "/devices/" + urllib.parse.quote(sn))
+        except IHostError as e:
+            log("remove unlock switch failed:", e)
+    dev["unlock_sn"] = None
+    save()
+    log("unlock switch removed from iHost:", dev.get("name"))
 
 
 def report_state(dev, state):
@@ -659,6 +847,13 @@ def resync_all():
         log("resync skipped:", e)
         return
     for dev in list(CFG["devices"].values()):
+        if dev.get("unlock_sn"):
+            usn = present.get("tuya_" + dev["id"] + "_unlock")
+            if not usn:
+                log("unlock switch removed in the iHost, unlinking:", dev.get("name"))
+            dev["unlock_sn"] = usn
+            if usn:
+                threading.Thread(target=report_switch_off, args=(dev,), daemon=True).start()
         if not dev.get("ihost_sn"):
             continue
         sn = present.get("tuya_" + dev["id"])
@@ -852,6 +1047,28 @@ def poller():
         time.sleep(max(0.5, POLL_SECONDS - (time.time() - start)))
 
 
+def lock_poller():
+    """Door locks are cloud-only: check them every LOCK_POLL_SECONDS (default 5 min) to stay inside the free
+    plan's monthly call quota. 3 failures in a row mark the sensor offline in the iHost."""
+    while True:
+        for dev in [d for d in CFG["devices"].values() if special_kind(d) == "lock" and d.get("ihost_sn")]:
+            due = time.time() - (dev.get("lock_checked") or 0) >= LOCK_POLL_SECONDS
+            if not due or not CFG["ihost"]["token"]:
+                continue
+            try:
+                refresh_lock(dev)
+            except Exception as e:
+                dev["lock_checked"] = time.time()
+                dev["_lock_fail"] = (dev.get("_lock_fail") or 0) + 1
+                dev["lock_error"] = str(e)
+                log("lock status failed:", dev.get("name"), e)
+                if dev["_lock_fail"] >= 3:
+                    set_online(dev, False, "Tuya cloud unreachable")
+            else:
+                dev["lock_error"] = None
+        time.sleep(5)
+
+
 def _safe(fn, *a):
     try:
         return fn(*a)
@@ -927,7 +1144,8 @@ def scan_worker():
 LEARN = {}  # dev_id -> {"state": "waiting"|"done"|"error", "key":..., "message":...}
 
 SPECIAL_NOTES = {
-    "lock": "Door lock: no local control. Status, history and unlock are in the iHost Home app (Tuya cloud).",
+    "lock": ("Door lock (Tuya cloud): add it to the iHost as a status sensor (locked = closed, checked every few minutes). "
+             "Unlocking from the iHost is optional and off unless you allow it below. The iHost Home app unlocks with a password."),
     "ir_hub": "IR transmitter: it sends the codes for your IR remotes (e.g. the AC). It doesn't need to be in the iHost.",
     "ir_other": "IR remote: only air conditioners are supported so far.",
 }
@@ -963,8 +1181,15 @@ def public_device(d):
            "kind": special or desc.get("display"), "special": special, "note": SPECIAL_NOTES.get(special),
            "channels": len(desc.get("channels") or []) or 1, "dimmable": bool(desc.get("bright")),
            "in_ihost": bool(d.get("ihost_sn")), "online": d.get("online"),
-           "addable": special not in ("lock", "ir_hub", "ir_other"),
+           "addable": special not in ("ir_hub", "ir_other"),
            "state": ihost_state_from_dps(d, d.get("last_dps") or {}) if d.get("last_dps") and not special else None}
+    if special == "lock":
+        st = d.get("lock_status") or {}
+        lu = d.get("last_unlock") or {}
+        out.update(locked=lock_locked(st) if st else None, battery=st.get("residual_electricity"),
+                   checked=d.get("lock_checked"), lock_error=d.get("lock_error"), cloud=cloud_ready(),
+                   unlock_enabled=bool(d.get("unlock_enabled")), unlock_in_ihost=bool(d.get("unlock_sn")),
+                   last_unlock=lu or None, poll_minutes=round(LOCK_POLL_SECONDS / 60, 1))
     if special == "ac":
         hub = hub_for(d)
         out.update(ac=ac_state(d), codes=sorted((d.get("codes") or {}).keys()), hub=hub and {"id": hub["id"], "name": hub.get("name")},
@@ -1057,15 +1282,26 @@ class Handler(BaseHTTPRequestHandler):
         mid = header.get("message_id", "")
         ep = d.get("endpoint") or {}
         tsn = ep.get("third_serial_number") or ""
-        dev = CFG["devices"].get(tsn[5:] if tsn.startswith("tuya_") else tsn)
+        is_unlock = tsn.endswith("_unlock")
+        dev_id = tsn[5:] if tsn.startswith("tuya_") else tsn
+        if is_unlock:
+            dev_id = dev_id[: -len("_unlock")]
+        dev = CFG["devices"].get(dev_id)
 
         def reply(name, payload):
             return self.send_json({"event": {"header": {"name": name, "message_id": mid, "version": "1"}, "payload": payload}})
 
         if header.get("name") != "UpdateDeviceStates" or not dev:
             return reply("ErrorResponse", {"type": "INVALID_DIRECTIVE" if dev else "ENDPOINT_UNREACHABLE"})
-        ok, result = apply_directive(dev, (d.get("payload") or {}).get("state") or {})
-        log("command", dev.get("name"), json.dumps((d.get("payload") or {}).get("state")), "->", "ok" if ok else result)
+        state = (d.get("payload") or {}).get("state") or {}
+        if is_unlock:
+            if dev.get("unlock_sn") != ep.get("serial_number"):
+                log("unlock refused: unknown switch serial", ep.get("serial_number"))
+                return reply("ErrorResponse", {"type": "INVALID_DIRECTIVE"})
+            ok, result = apply_unlock_switch(dev, state)
+        else:
+            ok, result = apply_directive(dev, state)
+        log("command", dev.get("name") + (" [UNLOCK SWITCH]" if is_unlock else ""), json.dumps(state), "->", "ok" if ok else result)
         if not ok:
             return reply("ErrorResponse", {"type": result})
         return reply("UpdateDeviceStatesResponse", {})
@@ -1130,12 +1366,38 @@ class Handler(BaseHTTPRequestHandler):
             if action == "add" and method == "POST":
                 if not CFG["ihost"]["token"]:
                     return self.send_json({"error": "Connect the iHost first."}, 400)
-                if not dev.get("key") and special_kind(dev) != "ac":
+                if not dev.get("key") and special_kind(dev) not in ("ac", "lock"):
                     return self.send_json({"error": "This device has no local key - import it from the Tuya cloud or devices.json."}, 400)
                 return self.send_json({"serial_number": add_to_ihost(dev["id"])})
             if action == "remove" and method == "POST":
                 remove_from_ihost(dev["id"])
                 return self.send_json({"ok": True})
+            if action == "unlock-enable" and method == "POST":
+                if special_kind(dev) != "lock":
+                    return self.send_json({"error": "not a lock"}, 400)
+                if b.get("enabled"):
+                    if str(b.get("confirm") or "").strip().upper() != "UNLOCK":
+                        return self.send_json({"error": "Type UNLOCK to confirm"}, 400)
+                    dev["unlock_enabled"] = True
+                    log("UNLOCK FROM iHOST ENABLED for", dev.get("name"))
+                else:
+                    dev["unlock_enabled"] = False
+                    if dev.get("unlock_sn"):
+                        remove_unlock_switch(dev["id"])
+                    log("unlock from iHost disabled for", dev.get("name"))
+                save()
+                return self.send_json({"ok": True})
+            if action == "add-unlock" and method == "POST":
+                return self.send_json({"serial_number": add_unlock_switch(dev["id"])})
+            if action == "remove-unlock" and method == "POST":
+                remove_unlock_switch(dev["id"])
+                return self.send_json({"ok": True})
+            if action == "lock-refresh" and method == "POST":
+                if special_kind(dev) != "lock":
+                    return self.send_json({"error": "not a lock"}, 400)
+                st = refresh_lock(dev)
+                save()
+                return self.send_json({"ok": True, "status": st})
             if action == "edit" and method == "POST":
                 for k in ("ip", "version", "name"):
                     if k in b and str(b[k]).strip():
@@ -1169,7 +1431,8 @@ class Handler(BaseHTTPRequestHandler):
                 special = special_kind(dev)
                 target = hub_for(dev) if special == "ac" else dev
                 if special == "lock":
-                    return self.send_json({"ok": False, "error": SPECIAL_NOTES["lock"]})
+                    st = refresh_lock(dev)
+                    return self.send_json({"ok": True, "dps": st})
                 if not target:
                     return self.send_json({"ok": False, "error": "No IR transmitter linked"})
                 res = link_for(target).status()
@@ -1231,6 +1494,7 @@ def main():
     log("iHost:", CFG["ihost"]["host"], "| paired" if CFG["ihost"]["token"] else "| not paired yet")
     threading.Thread(target=resync_all, daemon=True).start()
     threading.Thread(target=poller, daemon=True).start()
+    threading.Thread(target=lock_poller, daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

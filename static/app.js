@@ -92,7 +92,12 @@
     const st = d.state || {};
     const c = capSet(d);
     let icon = "sensor", text = "", active = false, alert = false;
-    if (c.has("motion")) {
+    if ((d.tags || {}).lock === "status" && c.has("contact")) {
+      const v = st.contact && st.contact.contact;
+      icon = v === false ? "unlock" : "lock";
+      active = v === false;
+      text = v === undefined ? "" : (v ? "Locked" : "Unlocked");
+    } else if (c.has("motion")) {
       icon = "motion";
       active = !!(st.motion && st.motion.motion);
       text = active ? "Motion Detected" : "No Motion";
@@ -128,6 +133,7 @@
   function accessories() {
     const out = [];
     for (const d of S.devices) {
+      if ((d.tags || {}).lock === "unlock-switch") continue; // bridge's iHost-only unlock switch: never a one-tap tile here
       const chans = channelsOf(d);
       const c = capSet(d);
       const room = roomOf(d);

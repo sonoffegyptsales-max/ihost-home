@@ -880,6 +880,10 @@ class Handler(BaseHTTPRequestHandler):
                 payload["name"] = name
             if not payload:
                 return self.send_json({"error": "nothing to update"}, 400)
+            if "state" in payload:
+                dev = next((d for d in device_list(hub) if d.get("serial_number") == rest[1]), None)
+                if dev and (dev.get("tags") or {}).get("lock") == "unlock-switch":
+                    return self.send_json({"error": "Door unlock isn't available as a switch in this app - use the iHost console or a CUBE scene."}, 403)
             res = ihost(hub, "PUT", "/devices/" + urllib.parse.quote(rest[1]), payload)
             return self.send_json(res, 200 if res.get("error") == 0 else 502)
         if len(rest) == 3 and rest[0] == "devices" and rest[2] == "tags" and method == "PATCH":

@@ -405,6 +405,13 @@ async function handle(req) {
           payload.name = name;
         }
         if (!Object.keys(payload).length) return json({ error: "nothing to update" }, 400);
+        if (payload.state) {
+          // the bridge's optional "door unlock" switch must never be flipped from this app (it has its own password unlock)
+          const dev = (await deviceList(hub)).find((d) => d.serial_number === rest[1]);
+          if (dev && (dev.tags || {}).lock === "unlock-switch") {
+            return json({ error: "Door unlock isn't available as a switch here - use the lock's Unlock button (password)." }, 403);
+          }
+        }
         const res = await ihost(hub, "PUT", `/devices/${encodeURIComponent(rest[1])}`, payload);
         return json(res, res.error === 0 ? 200 : 502);
       }

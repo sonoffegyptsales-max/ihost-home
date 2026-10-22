@@ -125,6 +125,12 @@ try:
           and "87%" in js("document.querySelector('[data-lock=lockdev1]').textContent"))
     check("UI: AC tile shows Off", wait("[...document.querySelectorAll('.tile')].some(t => t.textContent.includes('Living AC') && t.textContent.includes('Off'))"))
     shot("l1-home")
+    tiles = js("[...document.querySelectorAll('.tile')].map(t => t.textContent.replace(/\\s+/g, ' ').trim())")
+    check("UI: iHost unlock switch is NOT shown as a tile", not any("Unlock" in t and "Front Door Lock" in t for t in tiles), tiles)
+    check("UI: lock status sensor tile says Locked", any("Front Door Lock" in t and "Locked" in t for t in tiles), tiles)
+    hub_id = http("GET", "/api/hubs")[1]["hubs"][0]["id"]
+    st, r = http("PUT", f"/api/hubs/{hub_id}/devices/SN-UNLOCKSW", {"state": {"power": {"powerState": "on"}}})
+    check("API refuses to flip the unlock switch (403)", st == 403, (st, r))
     # AC sheet
     js("[...document.querySelectorAll('.tile')].find(t => t.textContent.includes('Living AC')).dispatchEvent(new MouseEvent('contextmenu', {bubbles: true}))")
     check("UI: AC sheet has mode/temp/fan", wait("document.querySelectorAll('[data-ac-mode]').length === 5 && !!document.querySelector('[data-ac-temp=\"1\"]') && document.querySelectorAll('[data-ac-fan]').length === 4"))

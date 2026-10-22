@@ -49,6 +49,12 @@ if os.environ.get("MOCK_AC"):
                                      {"capability": "thermostat-target-setpoint", "name": "manual-mode", "permission": "1100"}],
                     "state": {"power": {"powerState": "off"}, "mode": {"airConditionerMode": {"modeValue": "cool"}, "fanLevel": {"modeValue": "auto"}},
                               "thermostat-target-setpoint": {"manual-mode": {"targetSetpoint": 24}}}, "tags": {"room": "living"}})
+    DEVICES.append({"serial_number": "SN-LOCKSENS", "name": "Front Door Lock", "display_category": "contactSensor", "online": True,
+                    "capabilities": [{"capability": "contact", "permission": "0100"}, {"capability": "battery", "permission": "0100"}],
+                    "state": {"contact": {"contact": True}, "battery": {"battery": 80}}, "tags": {"lock": "status", "room": "living"}})
+    DEVICES.append({"serial_number": "SN-UNLOCKSW", "name": "Front Door Lock Unlock", "display_category": "switch", "online": True,
+                    "capabilities": [{"capability": "power", "permission": "1100"}],
+                    "state": {"power": {"powerState": "off"}}, "tags": {"lock": "unlock-switch", "room": "living"}})
 LOCK = threading.Lock()
 PAIR = {"pressed": False}
 LISTENERS = []

@@ -67,8 +67,20 @@ Notes: the iHost firmware requires `header.version: "2"` on `/thirdparty/event` 
 
 ## Door locks
 
-Tuya Wi-Fi locks have no local control. They're listed here but not added to the iHost. The **iHost Home cloud app
-(Vercel)** shows their status, battery, unlock history and alarms, and can unlock remotely with a separate unlock
-password (see the main README).
+Tuya Wi-Fi locks have no local control. Everything goes through the Tuya cloud (keys from step 2).
+
+**Status sensor in the iHost:** "Add status sensor to iHost" adds the lock as a **contact sensor**: closed = locked,
+open = unlocked, plus battery. It shows in the iHost, iHost Home and CUBE scenes ("when the door is unlocked, turn on the
+light"). It's checked every `LOCK_POLL_SECONDS` (default 300 s = 5 min, which keeps the free cloud plan's monthly calls
+comfortable). 3 failed checks in a row mark it offline.
+
+**Unlock switch in the iHost (optional, off by default):** "Allow…" (type `UNLOCK`) → "Add unlock switch to iHost"
+adds a switch called "<lock> Unlock". Turning it on unlocks through the cloud, and it falls back to Off by itself. Turning it
+off does nothing (Wi-Fi locks can't be locked remotely). Limited to 3 unlocks per 10 minutes, and every unlock is in the bridge log.
+**Warning:** the iHost can't ask for a password, so anyone with access to the iHost, eWeLink app, CUBE scenes or the
+iHost API token can open the door. "Disallow" removes the switch immediately. iHost Home never shows this switch and refuses
+to flip it: the app keeps its own password-protected **Unlock Door** (see the main README).
+
+`tests/e2e_lock.py <ihost-url> <token>`: 23 checks against a real iHost with a simulated Tuya cloud.
 
 `tests/e2e_ac.py <ihost-url> <token>`: 20 checks for the AC path against a real iHost, using a simulated IR transmitter and cloud.
